@@ -24,6 +24,13 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '关于' },
   },
   {
+    path: '/markdown',
+    name: 'MarkdownAnnotator',
+    component: () => import('@/views/MarkdownAnnotatorView.vue'),
+    /** hideNav: 保留平台抬头，但隐藏首页/关于等导航 tab */
+    meta: { title: 'Markdown 标注', hideNav: true },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/views/NotFoundView.vue'),

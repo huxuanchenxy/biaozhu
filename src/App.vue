@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 const appTitle = import.meta.env.VITE_APP_TITLE
@@ -10,6 +11,9 @@ const menus = [
 ]
 
 const route = useRoute()
+
+/** 标注页只保留抬头（logo + 环境标签），不显示导航 tab，内容区也撑满整屏 */
+const hideNav = computed(() => route.meta.hideNav === true)
 </script>
 
 <template>
@@ -18,6 +22,7 @@ const route = useRoute()
       <div class="logo">{{ appTitle }}</div>
 
       <el-menu
+        v-if="!hideNav"
         :default-active="route.path"
         mode="horizontal"
         router
@@ -28,6 +33,7 @@ const route = useRoute()
           {{ item.title }}
         </el-menu-item>
       </el-menu>
+      <div v-else class="layout-menu layout-menu--empty"></div>
 
       <div class="env-tag">
         <el-tag :type="appEnv === 'production' ? 'success' : 'warning'" size="small">
@@ -36,7 +42,7 @@ const route = useRoute()
       </div>
     </el-header>
 
-    <el-main class="layout-main">
+    <el-main :class="['layout-main', { 'layout-main--flush': hideNav }]">
       <router-view />
     </el-main>
   </el-container>
@@ -74,5 +80,10 @@ const route = useRoute()
 
 .layout-main {
   padding: 20px;
+}
+
+.layout-main--flush {
+  padding: 0;
+  overflow: hidden;
 }
 </style>
