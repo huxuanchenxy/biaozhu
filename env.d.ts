@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_APP_BASE_API: string
   /** 路由模式：hash | history */
   readonly VITE_ROUTER_MODE: string
+  /** 待标注文档地址（本地文件或后端接口） */
+  readonly VITE_APP_DOC_URL: string
   /** 开发代理目标地址 */
   readonly VITE_PROXY_TARGET: string
   /** 开发服务器端口 */

@@ -1,31 +1,45 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { renderMarkdown } from '@/utils/markdown'
+import MarkdownPreview from '@/components/MarkdownPreview.vue'
+import type { Annotation, Label } from '@/types/annotation'
 
-/** ---------- 文档 ---------- */
-const DEFAULT_DOC = `# 标注说明
+/**
+ * 待标注文档地址。
+ * 现在指向 public/doc 下的本地文件，后续换成后端接口时只改 .env 里的 VITE_APP_DOC_URL 即可。
+ */
+const DOC_URL = import.meta.env.VITE_APP_DOC_URL || '/doc/BE1020801A3.md'
 
-选中右侧预览区里的任意一段文字，即可在右边的标注面板中给它打标签。
+/* ------------------------------------------------------------------
+ * 已注释：编辑器相关功能（当前只需要预览）
+ * ------------------------------------------------------------------ */
+// const DEFAULT_DOC = `# 标注说明
+// ...
+// `
+// const viewMode = ref<'edit' | 'preview' | 'split'>('split')
 
-## 操作提示
+const content = ref('')
+const loading = ref(false)
+const loadError = ref('')
 
-1. 在预览区用鼠标**划选**一段文本
-2. 在右侧选择或新建一个标签
-3. 点击「添加标注」，文本会被高亮并记录到标注列表
-
-> 标注结果可以一键导出为 JSON，方便后续入库或二次加工。
-`
-
-const source = ref(DEFAULT_DOC)
-const viewMode = ref<'edit' | 'preview' | 'split'>('split')
-
-/** ---------- 标签 ---------- */
-interface Label {
-  name: string
-  color: string
+/** 拉取文档：以后换成接口也走这里，页面其它部分不用动 */
+async function loadDoc() {
+  loading.value = true
+  loadError.value = ''
+  try {
+    const res = await fetch(DOC_URL)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    content.value = await res.text()
+  } catch (e: any) {
+    loadError.value = `文档加载失败：${e?.message ?? '未知错误'}`
+  } finally {
+    loading.value = false
+  }
 }
 
+loadDoc()
+
+/** ---------- 标签 ---------- */
 const labels = ref<Label[]>([
   { name: '实体', color: '#409eff' },
   { name: '关系', color: '#67c23a' },
@@ -35,6 +49,15 @@ const labels = ref<Label[]>([
 const activeLabel = ref('实体')
 const newLabel = ref('')
 const LABEL_COLORS = ['#409eff', '#67c23a', '#e6a23c', '#9254de', '#f56c6c', '#909399']
+
+/** 标签配色：淡底 + 同色边框文字，避免 Element Plus color 属性表现不一致 */
+function tagStyle(color: string) {
+  return {
+    backgroundColor: `${color}1a`,
+    borderColor: color,
+    color,
+  }
+}
 
 function addLabel() {
   const name = newLabel.value.trim()
@@ -48,45 +71,23 @@ function addLabel() {
   newLabel.value = ''
 }
 
-/** 标签配色：淡底 + 同色边框文字，避免 Element Plus color 属性表现不一致 */
-function tagStyle(color: string) {
-  return {
-    backgroundColor: `${color}1a`,
-    borderColor: color,
-    color,
-  }
-}
-
 function removeLabel(name: string) {
   labels.value = labels.value.filter((l) => l.name !== name)
   if (activeLabel.value === name) activeLabel.value = labels.value[0]?.name ?? ''
 }
 
 /** ---------- 标注 ---------- */
-interface Annotation {
-  id: number
-  text: string
-  label: string
-  color: string
-  note: string
-}
-
 let seq = 0
 const annotations = ref<Annotation[]>([])
 const selectedText = ref('')
 const note = ref('')
 const activeId = ref<number | null>(null)
+const previewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
 
-const previewRef = ref<HTMLElement | null>(null)
-const html = computed(() => renderMarkdown(source.value))
-
-/** 预览区鼠标划选后同步到右侧面板 */
-function onSelect() {
-  const text = window.getSelection()?.toString().trim() ?? ''
-  if (text) {
-    selectedText.value = text
-    note.value = ''
-  }
+/** 预览组件抛出的划选文本 */
+function onSelect(text: string) {
+  selectedText.value = text
+  note.value = ''
 }
 
 function addAnnotation() {
@@ -115,16 +116,13 @@ function removeAnnotation(id: number) {
 
 function focusAnnotation(id: number) {
   activeId.value = id
-  const el = previewRef.value?.querySelector<HTMLElement>(`mark.ann[data-id="${id}"]`)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  previewRef.value?.focus(id)
 }
 
 function exportJSON() {
   const payload = JSON.stringify(
     {
-      source: source.value,
+      source: DOC_URL,
       annotations: annotations.value.map(({ id, text, label, note }) => ({ id, text, label, note })),
     },
     null,
@@ -137,68 +135,6 @@ function exportJSON() {
   a.click()
   URL.revokeObjectURL(url)
 }
-
-/** ---------- 高亮渲染 ---------- */
-function unwrapMarks(root: HTMLElement) {
-  root.querySelectorAll('mark.ann').forEach((m) => {
-    const parent = m.parentNode
-    if (!parent) return
-    while (m.firstChild) parent.insertBefore(m.firstChild, m)
-    parent.removeChild(m)
-    parent.normalize()
-  })
-}
-
-/** 把标注文本包成 <mark>，每条只高亮第一次出现的位置 */
-function applyHighlight(root: HTMLElement) {
-  for (const ann of annotations.value) {
-    if (!ann.text) continue
-
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        if (!node.nodeValue || !node.nodeValue.includes(ann.text)) return NodeFilter.FILTER_REJECT
-        let p = node.parentElement
-        while (p && p !== root) {
-          if (p.tagName === 'MARK') return NodeFilter.FILTER_REJECT
-          p = p.parentElement
-        }
-        return NodeFilter.FILTER_ACCEPT
-      },
-    })
-
-    const targets: Text[] = []
-    let n = walker.nextNode()
-    while (n) {
-      targets.push(n as Text)
-      n = walker.nextNode()
-    }
-
-    for (const node of targets) {
-      const idx = node.nodeValue?.indexOf(ann.text) ?? -1
-      if (idx < 0) continue
-      const range = document.createRange()
-      range.setStart(node, idx)
-      range.setEnd(node, idx + ann.text.length)
-      const mark = document.createElement('mark')
-      mark.className = 'ann'
-      mark.dataset.id = String(ann.id)
-      mark.style.backgroundColor = `${ann.color}26`
-      mark.style.boxShadow = `inset 0 -2px 0 ${ann.color}`
-      range.surroundContents(mark)
-      break
-    }
-  }
-}
-
-function refreshHighlight() {
-  const root = previewRef.value
-  if (!root) return
-  unwrapMarks(root)
-  applyHighlight(root)
-}
-
-watch([html, annotations], () => nextTick(refreshHighlight), { deep: true })
-onMounted(() => nextTick(refreshHighlight))
 
 const stats = computed(() => {
   const map = new Map<string, number>()
@@ -213,27 +149,37 @@ const stats = computed(() => {
     <section class="pane pane-left">
       <header class="pane-head">
         <span class="pane-title">文档</span>
+        <span v-if="loading" class="hint">加载中…</span>
+        <!-- 已注释：编辑 / 分栏 / 预览 模式切换（当前只需要预览） -->
+        <!--
         <el-radio-group v-model="viewMode" size="small">
           <el-radio-button value="edit">编辑</el-radio-button>
           <el-radio-button value="split">分栏</el-radio-button>
           <el-radio-button value="preview">预览</el-radio-button>
         </el-radio-group>
+        -->
       </header>
 
-      <div class="pane-body doc-body" :class="`mode-${viewMode}`">
+      <div class="pane-body doc-body">
+        <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" />
+
+        <!-- 已注释：编辑区（当前只需要预览） -->
+        <!--
         <textarea
           v-show="viewMode !== 'preview'"
-          v-model="source"
+          v-model="content"
           class="md-editor"
           spellcheck="false"
           placeholder="在此输入 Markdown 内容"
         />
-        <div
-          v-show="viewMode !== 'edit'"
+        -->
+
+        <MarkdownPreview
           ref="previewRef"
-          class="md-preview markdown-body"
-          @mouseup="onSelect"
-          v-html="html"
+          v-loading="loading"
+          :content="content"
+          :annotations="annotations"
+          @select="onSelect"
         />
       </div>
     </section>
@@ -374,31 +320,24 @@ const stats = computed(() => {
   font-weight: 600;
 }
 
+.hint {
+  font-size: 12px;
+  color: #a8abb2;
+}
+
 .pane-body {
   flex: 1;
   min-height: 0;
 }
 
-/* 左侧编辑 / 预览 */
+/* 左侧：当前只有预览 */
 .doc-body {
   display: flex;
   min-height: 0;
+  overflow: hidden;
 }
 
-.doc-body > * {
-  flex: 1;
-  min-width: 0;
-  overflow: auto;
-}
-
-.mode-split > * {
-  flex: 1 1 50%;
-}
-
-.mode-split .md-editor {
-  border-right: 1px solid #ebeef5;
-}
-
+/* 已注释：编辑区样式（当前只需要预览）
 .md-editor {
   padding: 16px;
   border: none;
@@ -407,93 +346,8 @@ const stats = computed(() => {
   font-family: Consolas, Monaco, 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.7;
-  color: #303133;
-  background: #fff;
 }
-
-.md-preview {
-  padding: 16px 20px;
-  line-height: 1.75;
-  color: #303133;
-}
-
-.md-preview :deep(h1),
-.md-preview :deep(h2),
-.md-preview :deep(h3) {
-  margin: 1em 0 0.6em;
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.md-preview :deep(h1) {
-  font-size: 22px;
-  border-bottom: 1px solid #ebeef5;
-  padding-bottom: 8px;
-}
-
-.md-preview :deep(h2) {
-  font-size: 18px;
-}
-
-.md-preview :deep(h3) {
-  font-size: 15px;
-}
-
-.md-preview :deep(p) {
-  margin: 0 0 0.9em;
-}
-
-.md-preview :deep(ul),
-.md-preview :deep(ol) {
-  margin: 0 0 0.9em;
-  padding-left: 22px;
-}
-
-.md-preview :deep(blockquote) {
-  margin: 0 0 0.9em;
-  padding: 8px 12px;
-  color: #606266;
-  background: #f5f7fa;
-  border-left: 3px solid #dcdfe6;
-}
-
-.md-preview :deep(code) {
-  padding: 2px 5px;
-  font-size: 12px;
-  background: #f5f7fa;
-  border-radius: 3px;
-}
-
-.md-preview :deep(pre) {
-  padding: 12px;
-  overflow: auto;
-  background: #f5f7fa;
-  border-radius: 4px;
-}
-
-.md-preview :deep(pre code) {
-  padding: 0;
-  background: none;
-}
-
-.md-preview :deep(table) {
-  width: 100%;
-  margin-bottom: 0.9em;
-  border-collapse: collapse;
-}
-
-.md-preview :deep(th),
-.md-preview :deep(td) {
-  padding: 6px 10px;
-  border: 1px solid #ebeef5;
-}
-
-.md-preview :deep(mark.ann) {
-  padding: 1px 0;
-  color: inherit;
-  border-radius: 2px;
-  cursor: pointer;
-}
+*/
 
 /* 右侧标注面板 */
 .side-body {
