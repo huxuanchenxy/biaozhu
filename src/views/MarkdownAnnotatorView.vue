@@ -3,7 +3,8 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import MarkdownTranslation from '@/components/MarkdownTranslation.vue'
-import type { Annotation, Label } from '@/types/annotation'
+import { getDocJson, saveDocJson } from '@/api'
+import type { DocJsonRecord } from '@/api/types'
 
 /**
  * 待标注文档地址。
@@ -56,56 +57,149 @@ async function loadDoc() {
 
 loadDoc()
 
-/** ---------- 标签 ---------- */
-const labels = ref<Label[]>([
-  { name: '实体', color: '#409eff' },
-  { name: '关系', color: '#67c23a' },
-  { name: '事件', color: '#e6a23c' },
-  { name: '观点', color: '#9254de' },
-])
-const activeLabel = ref('实体')
-const newLabel = ref('')
-const LABEL_COLORS = ['#409eff', '#67c23a', '#e6a23c', '#9254de', '#f56c6c', '#909399']
+/** ---------- 标注数据（Q&A 标签页） ---------- */
 
-/** 标签配色：淡底 + 同色边框文字，避免 Element Plus color 属性表现不一致 */
-function tagStyle(color: string) {
-  return {
-    backgroundColor: `${color}1a`,
-    borderColor: color,
-    color,
-  }
+/**
+ * 三个标签页的字段映射：每个 json 只取两个字段按一问一答展示，
+ * 顺序为（问槽位, 答槽位），其余字段隐藏。
+ */
+interface QaTab {
+  key: string
+  label: string
+  /** public/doc 下的 json 文件名 */
+  file: string
+  /** 问槽位展示的字段 */
+  qField: string
+  /** 答槽位展示的字段 */
+  aField: string
+  status: 'loading' | 'ok' | 'error'
+  error: string
+  records: DocJsonRecord[]
 }
 
-function addLabel() {
-  const name = newLabel.value.trim()
-  if (!name) return
-  if (labels.value.some((l) => l.name === name)) {
-    ElMessage.warning('标签已存在')
+const tabs = ref<QaTab[]>([
+  {
+    key: 'alpaca',
+    label: 'Alpaca',
+    file: 'BE1020801A3_alpaca.json',
+    qField: 'input',
+    aField: 'output',
+    status: 'loading',
+    error: '',
+    records: [],
+  },
+  {
+    key: 'cot',
+    label: 'COT',
+    file: 'BE1020801A3_cot.json',
+    qField: 'scenario',
+    aField: 'question',
+    status: 'loading',
+    error: '',
+    records: [],
+  },
+  {
+    key: 'qa',
+    label: 'QA',
+    file: 'BE1020801A3_qa.json',
+    qField: 'question',
+    aField: 'answer',
+    status: 'loading',
+    error: '',
+    records: [],
+  },
+])
+
+const activeTabKey = ref(tabs.value[0].key)
+const activeTab = computed(
+  () => tabs.value.find((t) => t.key === activeTabKey.value) ?? tabs.value[0],
+)
+
+/** 进入页面并行加载三个标签页：目前读本地 json，后续换接口只改 api 层 */
+function loadTab(tab: QaTab) {
+  tab.status = 'loading'
+  tab.error = ''
+  getDocJson(tab.file)
+    .then((records) => {
+      tab.records = records
+      tab.status = 'ok'
+    })
+    .catch((e: any) => {
+      tab.records = []
+      tab.error = `${tab.file} 加载失败：${e?.message ?? '未知错误'}`
+      tab.status = 'error'
+    })
+}
+
+tabs.value.forEach(loadTab)
+
+/** ---------- 前端分页 ---------- */
+const currentPage = ref(1)
+const pageSize = ref(5)
+
+/** 当前页的全局 0 基起始下标：用于 Q&A_n 编号与定位编辑项 */
+const pageStart = computed(() => (currentPage.value - 1) * pageSize.value)
+
+const pagedRecords = computed(() =>
+  activeTab.value.records.slice(pageStart.value, pageStart.value + pageSize.value),
+)
+
+/** ---------- Q&A 编辑 ---------- */
+/** 正在编辑的条目全局下标（0 基），-1 表示没在编辑 */
+const editingIndex = ref(-1)
+const editQ = ref('')
+const editA = ref('')
+const saving = ref(false)
+
+/** 切标签页回到第 1 页；切标签页/翻页都放弃进行中的编辑 */
+watch(activeTabKey, () => {
+  currentPage.value = 1
+  editingIndex.value = -1
+})
+watch([currentPage, pageSize], () => {
+  editingIndex.value = -1
+})
+
+function fieldText(rec: DocJsonRecord, field: string) {
+  const v = rec?.[field]
+  return v == null ? '' : String(v)
+}
+
+function startEdit(index: number) {
+  const rec = activeTab.value.records[index]
+  if (!rec) return
+  editingIndex.value = index
+  editQ.value = fieldText(rec, activeTab.value.qField)
+  editA.value = fieldText(rec, activeTab.value.aField)
+}
+
+function cancelEdit() {
+  editingIndex.value = -1
+}
+
+/** 保存单条 Q&A：写回当前标签页数据后上传整个标签页的 json（接口未接，api 层先模拟） */
+async function saveEdit() {
+  const tab = activeTab.value
+  const rec = tab.records[editingIndex.value]
+  if (!rec) {
+    editingIndex.value = -1
     return
   }
-  labels.value.push({ name, color: LABEL_COLORS[labels.value.length % LABEL_COLORS.length] })
-  activeLabel.value = name
-  newLabel.value = ''
+  rec[tab.qField] = editQ.value
+  rec[tab.aField] = editA.value
+  saving.value = true
+  try {
+    await saveDocJson(tab.file, tab.records)
+    ElMessage.success('已保存（上传接口未接，暂为本地修改）')
+    editingIndex.value = -1
+  } catch (e: any) {
+    ElMessage.error(`保存失败：${e?.message ?? '未知错误'}`)
+  } finally {
+    saving.value = false
+  }
 }
 
-function removeLabel(name: string) {
-  labels.value = labels.value.filter((l) => l.name !== name)
-  if (activeLabel.value === name) activeLabel.value = labels.value[0]?.name ?? ''
-}
-
-/** ---------- 标注 ---------- */
-let seq = 0
-const annotations = ref<Annotation[]>([])
-const selectedText = ref('')
-const note = ref('')
-const activeId = ref<number | null>(null)
 const previewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
-
-/** 预览组件抛出的划选文本 */
-function onSelect(text: string) {
-  selectedText.value = text
-  note.value = ''
-}
 
 /** ---------- 预览 / 原文 / 翻译 滚动同步 ---------- */
 const sourceRef = ref<HTMLElement | null>(null)
@@ -185,58 +279,6 @@ watch(viewMode, (mode) => {
     }
   })
 })
-
-function addAnnotation() {
-  const text = selectedText.value.trim()
-  if (!text) {
-    ElMessage.warning('请先在预览区选中一段文本')
-    return
-  }
-  const label = labels.value.find((l) => l.name === activeLabel.value)
-  annotations.value.push({
-    id: ++seq,
-    text,
-    label: label?.name ?? '未分类',
-    color: label?.color ?? '#909399',
-    note: note.value.trim(),
-  })
-  selectedText.value = ''
-  note.value = ''
-  window.getSelection()?.removeAllRanges()
-}
-
-function removeAnnotation(id: number) {
-  annotations.value = annotations.value.filter((a) => a.id !== id)
-  if (activeId.value === id) activeId.value = null
-}
-
-function focusAnnotation(id: number) {
-  activeId.value = id
-  previewRef.value?.focus(id)
-}
-
-function exportJSON() {
-  const payload = JSON.stringify(
-    {
-      source: DOC_URL,
-      annotations: annotations.value.map(({ id, text, label, note }) => ({ id, text, label, note })),
-    },
-    null,
-    2,
-  )
-  const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'annotations.json'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-const stats = computed(() => {
-  const map = new Map<string, number>()
-  annotations.value.forEach((a) => map.set(a.label, (map.get(a.label) ?? 0) + 1))
-  return [...map.entries()]
-})
 </script>
 
 <template>
@@ -273,8 +315,6 @@ const stats = computed(() => {
           ref="previewRef"
           v-loading="loading"
           :content="content"
-          :annotations="annotations"
-          @select="onSelect"
           @scroll="onPreviewScroll"
         />
 
@@ -302,93 +342,81 @@ const stats = computed(() => {
     <section class="pane pane-right">
       <header class="pane-head">
         <span class="pane-title">标注</span>
-        <el-button size="small" :disabled="!annotations.length" @click="exportJSON">
-          导出 JSON
-        </el-button>
+        <span v-if="activeTab.status === 'ok'" class="hint">共 {{ activeTab.records.length }} 条</span>
       </header>
 
-      <div class="pane-body side-body">
-        <div class="block">
-          <div class="block-title">待标注文本</div>
-          <div v-if="selectedText" class="quote">{{ selectedText }}</div>
-          <div v-else class="empty">在左侧预览区划选文本</div>
-          <el-input
-            v-model="note"
-            class="note-input"
-            size="small"
-            placeholder="备注（可选）"
-            maxlength="100"
-            show-word-limit
-          />
-          <el-button type="primary" size="small" class="full" @click="addAnnotation">
-            添加标注
-          </el-button>
-        </div>
+      <el-tabs v-model="activeTabKey" class="qa-tabs">
+        <el-tab-pane
+          v-for="t in tabs"
+          :key="t.key"
+          :name="t.key"
+          :label="t.status === 'ok' ? `${t.label}（${t.records.length}）` : t.label"
+        />
+      </el-tabs>
 
-        <div class="block">
-          <div class="block-title">标签</div>
-          <div class="label-wrap">
-            <span
-              v-for="l in labels"
-              :key="l.name"
-              class="label-chip"
-              @click="activeLabel = l.name"
-            >
-              <el-tag
-                :class="{ active: activeLabel === l.name }"
-                :style="tagStyle(l.color)"
-                closable
-                @close="removeLabel(l.name)"
-              >
-                {{ l.name }}
-              </el-tag>
-            </span>
-          </div>
-          <div class="label-add">
-            <el-input v-model="newLabel" size="small" placeholder="新标签名" @keyup.enter="addLabel" />
-            <el-button size="small" @click="addLabel">新增</el-button>
-          </div>
-        </div>
+      <div v-loading="activeTab.status === 'loading'" class="pane-body qa-body">
+        <el-alert
+          v-if="activeTab.status === 'error'"
+          :title="activeTab.error"
+          type="error"
+          show-icon
+          :closable="false"
+        />
 
-        <div class="block" v-if="stats.length">
-          <div class="block-title">统计</div>
-          <div class="label-wrap">
-            <el-tag
-              v-for="[name, count] in stats"
-              :key="name"
-              size="small"
-              :style="tagStyle(labels.find((l) => l.name === name)?.color ?? '#909399')"
-            >
-              {{ name }} · {{ count }}
-            </el-tag>
-          </div>
-        </div>
+        <div v-else class="qa-list">
+          <article v-for="(rec, i) in pagedRecords" :key="pageStart + i" class="qa-card">
+            <header class="qa-card-head">Q&A_{{ pageStart + i + 1 }}</header>
 
-        <div class="block block-list">
-          <div class="block-title">
-            标注列表
-            <span class="count">{{ annotations.length }}</span>
-          </div>
-          <div v-if="!annotations.length" class="empty">暂无标注</div>
-          <ul v-else class="ann-list">
-            <li
-              v-for="a in annotations"
-              :key="a.id"
-              :class="['ann-item', { active: activeId === a.id }]"
-              @click="focusAnnotation(a.id)"
-            >
-              <div class="ann-top">
-                <el-tag size="small" :style="tagStyle(a.color)">{{ a.label }}</el-tag>
-                <el-button link type="danger" size="small" @click.stop="removeAnnotation(a.id)">
-                  删除
+            <!-- 问槽位 -->
+            <div class="qa-question">
+              <el-input
+                v-if="editingIndex === pageStart + i"
+                v-model="editQ"
+                type="textarea"
+                :autosize="{ minRows: 2, maxRows: 10 }"
+              />
+              <div v-else class="qa-text">{{ fieldText(rec, activeTab.qField) }}</div>
+            </div>
+
+            <!-- 答槽位 + 操作按钮 -->
+            <div class="qa-answer">
+              <el-input
+                v-if="editingIndex === pageStart + i"
+                v-model="editA"
+                type="textarea"
+                :autosize="{ minRows: 3, maxRows: 14 }"
+              />
+              <div v-else class="qa-text">{{ fieldText(rec, activeTab.aField) }}</div>
+
+              <div class="qa-actions">
+                <template v-if="editingIndex === pageStart + i">
+                  <el-button size="small" :disabled="saving" @click="cancelEdit">取消</el-button>
+                  <el-button size="small" type="primary" :loading="saving" @click="saveEdit">
+                    保存
+                  </el-button>
+                </template>
+                <el-button v-else size="small" type="primary" @click="startEdit(pageStart + i)">
+                  编辑
                 </el-button>
               </div>
-              <div class="ann-text">{{ a.text }}</div>
-              <div v-if="a.note" class="ann-note">备注：{{ a.note }}</div>
-            </li>
-          </ul>
+            </div>
+          </article>
+
+          <div v-if="activeTab.status === 'ok' && !pagedRecords.length" class="empty">暂无数据</div>
         </div>
       </div>
+
+      <footer class="qa-footer">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="activeTab.status === 'ok' ? activeTab.records.length : 0"
+          :page-sizes="[5, 10, 20, 50]"
+          layout="total, sizes, prev, pager, next"
+          size="small"
+          background
+        />
+      </footer>
     </section>
   </div>
 </template>
@@ -493,41 +521,79 @@ const stats = computed(() => {
 }
 */
 
-/* 右侧标注面板 */
-.side-body {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 16px;
-  overflow: auto;
+/* 右侧标注面板：标签页 + Q&A 卡片 + 分页 */
+.qa-tabs {
+  flex: none;
+  padding: 0 16px;
 }
 
-.block-title {
+.qa-tabs :deep(.el-tabs__header) {
+  margin-bottom: 0;
+}
+
+.qa-body {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow: auto;
+  background: #f0f2f5;
+}
+
+.qa-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qa-card {
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+
+.qa-card-head {
+  padding: 8px 12px;
   font-size: 13px;
   font-weight: 600;
   color: #303133;
-}
-
-.count {
-  padding: 0 6px;
-  font-weight: 500;
-  color: #909399;
   background: #f5f7fa;
-  border-radius: 8px;
+  border-bottom: 1px solid #ebeef5;
 }
 
-.quote {
-  padding: 8px 10px;
+/* 问槽位：白底带边框盒子 */
+.qa-question {
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+}
+
+/* 答槽位：灰底带边框盒子，右下角放操作按钮 */
+.qa-answer {
+  margin: 10px 12px 12px;
+  padding: 10px 12px;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+}
+
+.qa-text {
   font-size: 13px;
+  line-height: 1.7;
   color: #303133;
-  background: #f5f7fa;
-  border-left: 3px solid #409eff;
-  border-radius: 2px;
-  word-break: break-all;
+  /* 问答内容自带换行，保留原始排版 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .empty {
@@ -536,79 +602,11 @@ const stats = computed(() => {
   color: #a8abb2;
 }
 
-.note-input {
-  margin-top: 10px;
-}
-
-.full {
-  width: 100%;
-  margin-top: 10px;
-}
-
-.label-wrap {
+.qa-footer {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.label-chip {
-  cursor: pointer;
-}
-
-.label-chip .active {
-  outline: 2px solid #409eff;
-  outline-offset: 1px;
-}
-
-.label-add {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.block-list {
-  flex: 1;
-  min-height: 0;
-}
-
-.ann-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ann-item {
-  padding: 10px;
-  margin-bottom: 8px;
-  background: #fafafa;
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.ann-item:hover,
-.ann-item.active {
-  border-color: #409eff;
-  background: #ecf5ff;
-}
-
-.ann-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-
-.ann-text {
-  font-size: 13px;
-  line-height: 1.6;
-  color: #303133;
-  word-break: break-all;
-}
-
-.ann-note {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #909399;
+  justify-content: flex-end;
+  flex: none;
+  padding: 8px 16px;
+  border-top: 1px solid #ebeef5;
 }
 </style>

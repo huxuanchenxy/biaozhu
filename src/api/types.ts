@@ -16,3 +16,6 @@ export interface SkillItem {
   description?: string
   [key: string]: any
 }
+
+/** 标注数据条目：doc 下各 json 均为对象数组，字段随文件类型不同，这里只做弱约束 */
+export type DocJsonRecord = Record<string, any>

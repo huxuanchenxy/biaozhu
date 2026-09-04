@@ -4,12 +4,15 @@ import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
 import type { Annotation } from '@/types/annotation'
 
-const props = defineProps<{
-  /** markdown 原文 */
-  content: string
-  /** 需要在预览里高亮的标注 */
-  annotations: Annotation[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    /** markdown 原文 */
+    content: string
+    /** 需要在预览里高亮的标注，不传则不高亮 */
+    annotations?: Annotation[]
+  }>(),
+  { annotations: () => [] },
+)
 
 const emit = defineEmits<{
   /** 用户在预览区鼠标划选了一段文本 */
