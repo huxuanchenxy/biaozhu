@@ -3,7 +3,6 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 const appTitle = import.meta.env.VITE_APP_TITLE
-const appEnv = import.meta.env.VITE_APP_ENV
 
 const menus = [
   { path: '/home', title: '首页' },
@@ -12,7 +11,7 @@ const menus = [
 
 const route = useRoute()
 
-/** 标注页只保留抬头（logo + 环境标签），不显示导航 tab，内容区也撑满整屏 */
+/** 标注页只保留抬头（logo），不显示导航 tab，内容区也撑满整屏 */
 const hideNav = computed(() => route.meta.hideNav === true)
 </script>
 
@@ -34,12 +33,6 @@ const hideNav = computed(() => route.meta.hideNav === true)
         </el-menu-item>
       </el-menu>
       <div v-else class="layout-menu layout-menu--empty"></div>
-
-      <div class="env-tag">
-        <el-tag :type="appEnv === 'production' ? 'success' : 'warning'" size="small">
-          {{ appEnv }}
-        </el-tag>
-      </div>
     </el-header>
 
     <el-main :class="['layout-main', { 'layout-main--flush': hideNav }]">
@@ -72,10 +65,6 @@ const hideNav = computed(() => route.meta.hideNav === true)
   flex: 1;
   margin-left: 32px;
   border-bottom: none;
-}
-
-.env-tag {
-  white-space: nowrap;
 }
 
 .layout-main {
