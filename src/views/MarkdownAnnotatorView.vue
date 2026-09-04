@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import type { Annotation, Label } from '@/types/annotation'
@@ -10,13 +10,19 @@ import type { Annotation, Label } from '@/types/annotation'
  */
 const DOC_URL = import.meta.env.VITE_APP_DOC_URL || '/doc/BE1020801A3.md'
 
+/**
+ * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步。
+ * 需要恢复编辑能力时，把 'edit' 加回来并接上下面的编辑区即可。
+ */
+type ViewMode = 'preview' | 'split' | 'source'
+const viewMode = ref<ViewMode>('preview')
+
 /* ------------------------------------------------------------------
- * 已注释：编辑器相关功能（当前只需要预览）
+ * 已注释：可编辑的文档内容（当前只需要预览 + 只读看原文）
  * ------------------------------------------------------------------ */
 // const DEFAULT_DOC = `# 标注说明
 // ...
 // `
-// const viewMode = ref<'edit' | 'preview' | 'split'>('split')
 
 const content = ref('')
 const loading = ref(false)
@@ -90,6 +96,63 @@ function onSelect(text: string) {
   note.value = ''
 }
 
+/** ---------- 预览 / 原文 滚动同步 ---------- */
+const sourceRef = ref<HTMLElement | null>(null)
+/** 最近一次滚动比例，切换模式时用来把位置带过去 */
+const lastRatio = ref(0)
+
+/**
+ * 谁在主动滚。被动那一方设置 scrollTop 也会触发 scroll 事件，
+ * 不锁住的话两边会互相拉扯，出现抖动。
+ */
+let syncOwner: 'preview' | 'source' | null = null
+let syncTimer: ReturnType<typeof setTimeout> | undefined
+
+function setScrollRatio(el: HTMLElement | null, ratio: number) {
+  if (!el) return
+  const max = el.scrollHeight - el.clientHeight
+  el.scrollTop = Math.max(0, Math.min(max, ratio * max))
+}
+
+/** 只有分栏模式才需要同步，单栏模式下只记录位置 */
+function syncScroll(from: 'preview' | 'source', ratio: number) {
+  lastRatio.value = ratio
+  if (viewMode.value !== 'split') return
+
+  if (syncOwner && syncOwner !== from) return
+  syncOwner = from
+  if (syncTimer) clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    syncOwner = null
+    syncTimer = undefined
+  }, 120)
+
+  if (from === 'preview') setScrollRatio(sourceRef.value, ratio)
+  else previewRef.value?.setScrollRatio(ratio)
+}
+
+function onPreviewScroll(ratio: number) {
+  syncScroll('preview', ratio)
+}
+
+function onSourceScroll() {
+  syncScroll('source', getRatio(sourceRef.value))
+}
+
+function getRatio(el: HTMLElement | null) {
+  if (!el) return 0
+  const max = el.scrollHeight - el.clientHeight
+  return max > 0 ? el.scrollTop / max : 0
+}
+
+/** 切换模式后把滚动位置按比例搬过去，避免从头开始看 */
+watch(viewMode, (mode) => {
+  nextTick(() => {
+    if (mode !== 'source') previewRef.value?.setScrollRatio(lastRatio.value)
+    if (mode !== 'preview') setScrollRatio(sourceRef.value, lastRatio.value)
+  })
+})
+
 function addAnnotation() {
   const text = selectedText.value.trim()
   if (!text) {
@@ -150,14 +213,11 @@ const stats = computed(() => {
       <header class="pane-head">
         <span class="pane-title">文档</span>
         <span v-if="loading" class="hint">加载中…</span>
-        <!-- 已注释：编辑 / 分栏 / 预览 模式切换（当前只需要预览） -->
-        <!--
         <el-radio-group v-model="viewMode" size="small">
-          <el-radio-button value="edit">编辑</el-radio-button>
-          <el-radio-button value="split">分栏</el-radio-button>
           <el-radio-button value="preview">预览</el-radio-button>
+          <el-radio-button value="split">分栏</el-radio-button>
+          <el-radio-button value="source">原文</el-radio-button>
         </el-radio-group>
-        -->
       </header>
 
       <div class="pane-body doc-body">
@@ -175,12 +235,22 @@ const stats = computed(() => {
         -->
 
         <MarkdownPreview
+          v-show="viewMode !== 'source'"
           ref="previewRef"
           v-loading="loading"
           :content="content"
           :annotations="annotations"
           @select="onSelect"
+          @scroll="onPreviewScroll"
         />
+
+        <!-- 原文只读查看：用 v-show 保住预览区 DOM，切回来时高亮和滚动位置都还在 -->
+        <pre
+          v-show="viewMode !== 'preview'"
+          ref="sourceRef"
+          :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
+          @scroll.passive="onSourceScroll"
+        >{{ content }}</pre>
       </div>
     </section>
 
@@ -330,11 +400,33 @@ const stats = computed(() => {
   min-height: 0;
 }
 
-/* 左侧：当前只有预览 */
+/* 左侧：默认预览，可切到分栏（滚动同步）或只读原文 */
 .doc-body {
   display: flex;
   min-height: 0;
   overflow: hidden;
+}
+
+/* 分栏时两个容器各占一半，中间加分隔线 */
+.md-source--split {
+  flex: 0 0 50%;
+  border-left: 1px solid #ebeef5;
+}
+
+.md-source {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 20px;
+  overflow: auto;
+  font-family: Consolas, Monaco, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #303133;
+  /* 文档里有超长行，pre-wrap 换行避免横向滚动条 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #fff;
 }
 
 /* 已注释：编辑区样式（当前只需要预览）

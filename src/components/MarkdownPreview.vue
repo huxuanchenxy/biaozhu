@@ -14,6 +14,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 用户在预览区鼠标划选了一段文本 */
   select: [text: string]
+  /** 滚动位置变化，参数是 0~1 的比例 */
+  scroll: [ratio: number]
 }>()
 
 const hostRef = ref<HTMLElement | null>(null)
@@ -22,6 +24,27 @@ const hostRef = ref<HTMLElement | null>(null)
 function onMouseUp() {
   const text = window.getSelection()?.toString().trim() ?? ''
   if (text) emit('select', text)
+}
+
+/** ---------- 滚动同步 ---------- */
+
+/** 当前滚动比例，0 顶部、1 底部 */
+function getScrollRatio(el: HTMLElement | null) {
+  if (!el) return 0
+  const max = el.scrollHeight - el.clientHeight
+  return max > 0 ? el.scrollTop / max : 0
+}
+
+function onScroll() {
+  emit('scroll', getScrollRatio(hostRef.value))
+}
+
+/** 供父组件调用：按比例定位，用于与原文双向同步 */
+function setScrollRatio(ratio: number) {
+  const el = hostRef.value
+  if (!el) return
+  const max = el.scrollHeight - el.clientHeight
+  el.scrollTop = Math.max(0, Math.min(max, ratio * max))
 }
 
 /** ---------- 标注高亮 ---------- */
@@ -124,11 +147,11 @@ function focus(id: number) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
-defineExpose({ focus })
+defineExpose({ focus, setScrollRatio })
 </script>
 
 <template>
-  <div ref="hostRef" class="md-preview-host" @mouseup="onMouseUp">
+  <div ref="hostRef" class="md-preview-host" @mouseup="onMouseUp" @scroll.passive="onScroll">
     <MdPreview
       :model-value="content"
       preview-theme="github"
