@@ -1,0 +1,66 @@
+[
+  {
+    "question": "What is the duration of the patent granted to Kobe Steel Ltd.?",
+    "answer": "The patent is granted for a duration of 20 years.",
+    "source_clause": "Article unique.-Il est délivré à : KABUSHIKI KAISHA KOBE SEIKO SHO (KOBE STEEL Ltd.)...un brevet d'invention d'une durée de 20 ans...",
+    "knowledge_point": "Patent Duration",
+    "difficulty": "简单",
+    "category": "定义类"
+  },
+  {
+    "question": "Who are the inventors of the steel invention?",
+    "answer": "The inventors are Tetsushi Deura, Hiroki Ohta, Takashi Sugitani, Yoshitomi Okazaki, and Hidenori Nako.",
+    "source_clause": "INVENTEUR(S) : Tetsushi Deura, c/o Kobe Corporate Research Laboratories in Kobe Steel, Ltd....",
+    "knowledge_point": "Inventors",
+    "difficulty": "简单",
+    "category": "定义类"
+  },
+  {
+    "question": "What is the international classification of the patent?",
+    "answer": "The international classification of the patent is C22C.",
+    "source_clause": "Classif. Internat. : C22C",
+    "knowledge_point": "Patent Classification",
+    "difficulty": "简单",
+    "category": "定义类"
+  },
+  {
+    "question": "What is the context of the invention related to the steel used for welded structures?",
+    "answer": "The context of the invention is improving the toughness of the base metal and the heat-affected zone during high-temperature welding for structures like bridges, high-rise buildings, ships, and similar applications.",
+    "source_clause": "La présente invention concerne l'acier utilisé pour des structures soudées telles que des ponts, des immeubles de grande hauteur, des navires et similaires, et concerne une technologie améliorant la ténacité du métal de base et la ténacité d'une position recevant un effet thermique lors du soudage à température élevée...",
+    "knowledge_point": "Invention Context",
+    "difficulty": "中等",
+    "category": "定义类"
+  },
+  {
+    "question": "什么是HAZ结构及其效果？",
+    "answer": "HAZ结构是指焊接热影响区(Heat Affected Zone)的结构,它对材料的性能有显著影响。",
+    "source_clause": "D3",
+    "knowledge_point": "HAZ结构",
+    "difficulty": "简单",
+    "category": "定义类"
+  },
+  {
+    "question": "如何提高HAZ的韧性？",
+    "answer": "提高HAZ韧性的解决方案包括优化焊接参数、使用合适的材料和处理工艺。",
+    "source_clause": "D5",
+    "knowledge_point": "HAZ韧性解决方案",
+    "difficulty": "中等",
+    "category": "要求类"
+  },
+  {
+    "question": "焊接过程中的热输入参数有哪些？",
+    "answer": "热输入参数包括焊接电流、电压、焊接速度和预热温度等。",
+    "source_clause": "D7",
+    "knowledge_point": "热输入参数",
+    "difficulty": "简单",
+    "category": "参数类"
+  },
+  {
+    "question": "如何采取分层措施来提高拉伸强度？",
+    "answer": "通过采用分层措施,如优化焊接工艺、使用合适的材料和热处理,可以改善材料的拉伸强度。",
+    "source_clause": "D8",
+    "knowledge_point": "拉伸强度分层措施",
+    "difficulty": "中等",
+    "category": "要求类"
+  }
+]

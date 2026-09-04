@@ -1,0 +1,90 @@
+[
+  {
+    "instruction": "What is the duration of the patent granted to Kobe Steel Ltd.?",
+    "input": "参考条款: Article unique.-Il est délivré à : KABUSHIKI KAISHA KOBE SEIKO SHO (KOBE STEEL Ltd.)...un brevet d'invention d'une durée de 20 ans... | 知识点: Patent Duration",
+    "output": "The patent is granted for a duration of 20 years.",
+    "metadata": {
+      "source_clause": "Article unique.-Il est délivré à : KABUSHIKI KAISHA KOBE SEIKO SHO (KOBE STEEL Ltd.)...un brevet d'invention d'une durée de 20 ans...",
+      "knowledge_point": "Patent Duration",
+      "difficulty": "简单",
+      "category": "定义类"
+    }
+  },
+  {
+    "instruction": "Who are the inventors of the steel invention?",
+    "input": "参考条款: INVENTEUR(S) : Tetsushi Deura, c/o Kobe Corporate Research Laboratories in Kobe Steel, Ltd.... | 知识点: Inventors",
+    "output": "The inventors are Tetsushi Deura, Hiroki Ohta, Takashi Sugitani, Yoshitomi Okazaki, and Hidenori Nako.",
+    "metadata": {
+      "source_clause": "INVENTEUR(S) : Tetsushi Deura, c/o Kobe Corporate Research Laboratories in Kobe Steel, Ltd....",
+      "knowledge_point": "Inventors",
+      "difficulty": "简单",
+      "category": "定义类"
+    }
+  },
+  {
+    "instruction": "What is the international classification of the patent?",
+    "input": "参考条款: Classif. Internat. : C22C | 知识点: Patent Classification",
+    "output": "The international classification of the patent is C22C.",
+    "metadata": {
+      "source_clause": "Classif. Internat. : C22C",
+      "knowledge_point": "Patent Classification",
+      "difficulty": "简单",
+      "category": "定义类"
+    }
+  },
+  {
+    "instruction": "What is the context of the invention related to the steel used for welded structures?",
+    "input": "参考条款: La présente invention concerne l'acier utilisé pour des structures soudées telles que des ponts, des immeubles de grande hauteur, des navires et similaires, et concerne une technologie améliorant la ténacité du métal de base et la ténacité d'une position recevant un effet thermique lors du soudage à température élevée... | 知识点: Invention Context",
+    "output": "The context of the invention is improving the toughness of the base metal and the heat-affected zone during high-temperature welding for structures like bridges, high-rise buildings, ships, and similar applications.",
+    "metadata": {
+      "source_clause": "La présente invention concerne l'acier utilisé pour des structures soudées telles que des ponts, des immeubles de grande hauteur, des navires et similaires, et concerne une technologie améliorant la ténacité du métal de base et la ténacité d'une position recevant un effet thermique lors du soudage à température élevée...",
+      "knowledge_point": "Invention Context",
+      "difficulty": "中等",
+      "category": "定义类"
+    }
+  },
+  {
+    "instruction": "什么是HAZ结构及其效果？",
+    "input": "参考条款: D3 | 知识点: HAZ结构",
+    "output": "HAZ结构是指焊接热影响区(Heat Affected Zone)的结构,它对材料的性能有显著影响。",
+    "metadata": {
+      "source_clause": "D3",
+      "knowledge_point": "HAZ结构",
+      "difficulty": "简单",
+      "category": "定义类"
+    }
+  },
+  {
+    "instruction": "如何提高HAZ的韧性？",
+    "input": "参考条款: D5 | 知识点: HAZ韧性解决方案",
+    "output": "提高HAZ韧性的解决方案包括优化焊接参数、使用合适的材料和处理工艺。",
+    "metadata": {
+      "source_clause": "D5",
+      "knowledge_point": "HAZ韧性解决方案",
+      "difficulty": "中等",
+      "category": "要求类"
+    }
+  },
+  {
+    "instruction": "焊接过程中的热输入参数有哪些？",
+    "input": "参考条款: D7 | 知识点: 热输入参数",
+    "output": "热输入参数包括焊接电流、电压、焊接速度和预热温度等。",
+    "metadata": {
+      "source_clause": "D7",
+      "knowledge_point": "热输入参数",
+      "difficulty": "简单",
+      "category": "参数类"
+    }
+  },
+  {
+    "instruction": "如何采取分层措施来提高拉伸强度？",
+    "input": "参考条款: D8 | 知识点: 拉伸强度分层措施",
+    "output": "通过采用分层措施,如优化焊接工艺、使用合适的材料和热处理,可以改善材料的拉伸强度。",
+    "metadata": {
+      "source_clause": "D8",
+      "knowledge_point": "拉伸强度分层措施",
+      "difficulty": "中等",
+      "category": "要求类"
+    }
+  }
+]

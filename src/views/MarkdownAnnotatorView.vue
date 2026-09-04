@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
+import MarkdownTranslation from '@/components/MarkdownTranslation.vue'
 import type { Annotation, Label } from '@/types/annotation'
 
 /**
@@ -11,10 +12,11 @@ import type { Annotation, Label } from '@/types/annotation'
 const DOC_URL = import.meta.env.VITE_APP_DOC_URL || '/doc/BE1020801A3.md'
 
 /**
- * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步。
+ * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步；
+ * 翻译模式下预览与译文并排且滚动同步。
  * 需要恢复编辑能力时，把 'edit' 加回来并接上下面的编辑区即可。
  */
-type ViewMode = 'preview' | 'split' | 'source'
+type ViewMode = 'preview' | 'split' | 'source' | 'translate'
 const viewMode = ref<ViewMode>('preview')
 
 /* ------------------------------------------------------------------
@@ -96,8 +98,9 @@ function onSelect(text: string) {
   note.value = ''
 }
 
-/** ---------- 预览 / 原文 滚动同步 ---------- */
+/** ---------- 预览 / 原文 / 翻译 滚动同步 ---------- */
 const sourceRef = ref<HTMLElement | null>(null)
+const translationRef = ref<InstanceType<typeof MarkdownTranslation> | null>(null)
 /** 最近一次滚动比例，切换模式时用来把位置带过去 */
 const lastRatio = ref(0)
 
@@ -105,7 +108,7 @@ const lastRatio = ref(0)
  * 谁在主动滚。被动那一方设置 scrollTop 也会触发 scroll 事件，
  * 不锁住的话两边会互相拉扯，出现抖动。
  */
-let syncOwner: 'preview' | 'source' | null = null
+let syncOwner: 'preview' | 'source' | 'translation' | null = null
 let syncTimer: ReturnType<typeof setTimeout> | undefined
 
 function setScrollRatio(el: HTMLElement | null, ratio: number) {
@@ -114,11 +117,14 @@ function setScrollRatio(el: HTMLElement | null, ratio: number) {
   el.scrollTop = Math.max(0, Math.min(max, ratio * max))
 }
 
-/** 只有分栏模式才需要同步，单栏模式下只记录位置 */
-function syncScroll(from: 'preview' | 'source', ratio: number) {
+/**
+ * 各模式下只允许两端互相同步：
+ *   split      ↔ preview ↔ source
+ *   translate  ↔ preview ↔ translation
+ * 单栏模式只记录 lastRatio，不同步。
+ */
+function syncScroll(from: 'preview' | 'source' | 'translation', ratio: number) {
   lastRatio.value = ratio
-  if (viewMode.value !== 'split') return
-
   if (syncOwner && syncOwner !== from) return
   syncOwner = from
   if (syncTimer) clearTimeout(syncTimer)
@@ -127,8 +133,13 @@ function syncScroll(from: 'preview' | 'source', ratio: number) {
     syncTimer = undefined
   }, 120)
 
-  if (from === 'preview') setScrollRatio(sourceRef.value, ratio)
-  else previewRef.value?.setScrollRatio(ratio)
+  if (viewMode.value === 'split') {
+    if (from === 'preview') setScrollRatio(sourceRef.value, ratio)
+    else if (from === 'source') previewRef.value?.setScrollRatio(ratio)
+  } else if (viewMode.value === 'translate') {
+    if (from === 'preview') translationRef.value?.setScrollRatio(ratio)
+    else if (from === 'translation') previewRef.value?.setScrollRatio(ratio)
+  }
 }
 
 function onPreviewScroll(ratio: number) {
@@ -137,6 +148,10 @@ function onPreviewScroll(ratio: number) {
 
 function onSourceScroll() {
   syncScroll('source', getRatio(sourceRef.value))
+}
+
+function onTranslationScroll(ratio: number) {
+  syncScroll('translation', ratio)
 }
 
 function getRatio(el: HTMLElement | null) {
@@ -148,8 +163,17 @@ function getRatio(el: HTMLElement | null) {
 /** 切换模式后把滚动位置按比例搬过去，避免从头开始看 */
 watch(viewMode, (mode) => {
   nextTick(() => {
-    if (mode !== 'source') previewRef.value?.setScrollRatio(lastRatio.value)
-    if (mode !== 'preview') setScrollRatio(sourceRef.value, lastRatio.value)
+    if (mode === 'split') {
+      previewRef.value?.setScrollRatio(lastRatio.value)
+      setScrollRatio(sourceRef.value, lastRatio.value)
+    } else if (mode === 'translate') {
+      previewRef.value?.setScrollRatio(lastRatio.value)
+      translationRef.value?.setScrollRatio(lastRatio.value)
+    } else if (mode === 'preview') {
+      previewRef.value?.setScrollRatio(lastRatio.value)
+    } else if (mode === 'source') {
+      setScrollRatio(sourceRef.value, lastRatio.value)
+    }
   })
 })
 
@@ -216,6 +240,7 @@ const stats = computed(() => {
         <el-radio-group v-model="viewMode" size="small">
           <el-radio-button value="preview">预览</el-radio-button>
           <el-radio-button value="split">分栏</el-radio-button>
+          <el-radio-button value="translate">翻译</el-radio-button>
           <el-radio-button value="source">原文</el-radio-button>
         </el-radio-group>
       </header>
@@ -246,11 +271,20 @@ const stats = computed(() => {
 
         <!-- 原文只读查看：用 v-show 保住预览区 DOM，切回来时高亮和滚动位置都还在 -->
         <pre
-          v-show="viewMode !== 'preview'"
+          v-show="viewMode === 'split' || viewMode === 'source'"
           ref="sourceRef"
           :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
           @scroll.passive="onSourceScroll"
         >{{ content }}</pre>
+
+        <!-- 翻译视图：本地 Translator API，按段落分批 -->
+        <div v-show="viewMode === 'translate'" class="md-translation-host">
+          <MarkdownTranslation
+            ref="translationRef"
+            :content="content"
+            @scroll="onTranslationScroll"
+          />
+        </div>
       </div>
     </section>
 
@@ -427,6 +461,14 @@ const stats = computed(() => {
   white-space: pre-wrap;
   word-break: break-word;
   background: #fff;
+}
+
+/* 翻译视图：与预览并排时占 50% */
+.md-translation-host {
+  flex: 0 0 50%;
+  min-width: 0;
+  display: flex;
+  border-left: 1px solid #ebeef5;
 }
 
 /* 已注释：编辑区样式（当前只需要预览）
