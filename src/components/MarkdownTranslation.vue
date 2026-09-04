@@ -13,8 +13,10 @@ const props = withDefaults(
     content: string
     /** 目标语言，固定简体中文 */
     target?: string
+    /** 是否默认自动加载模型；false 时需手动点按钮触发（省内存） */
+    autoload?: boolean
   }>(),
-  { target: TARGET_NLLB },
+  { target: TARGET_NLLB, autoload: true },
 )
 
 type ChunkState = 'pending' | 'translating' | 'done'
@@ -27,7 +29,7 @@ interface Chunk {
 
 const hostRef = ref<HTMLElement | null>(null)
 const chunks = ref<Chunk[]>([])
-const status = ref<'idle' | 'detecting' | 'loading-model' | 'translating' | 'done' | 'unsupported' | 'no-model'>(
+const status = ref<'idle' | 'manual' | 'detecting' | 'loading-model' | 'translating' | 'done' | 'unsupported' | 'no-model'>(
   'idle',
 )
 const modelPct = ref(0)
@@ -42,6 +44,9 @@ const resolvedSource = computed(() => (sourceMode.value === 'auto' ? detectedSou
 
 let cancelledRef = false
 let engineInstance: TranslationEngine | null = null
+
+/** 模型加载是否已被触发：autoload 时初始即触发；否则等用户点「加载并翻译」 */
+const activated = ref(props.autoload)
 
 const emit = defineEmits<{
   scroll: [ratio: number]
@@ -98,6 +103,19 @@ async function prepare() {
   await runTranslate()
 }
 
+/** 有内容时：已激活则加载并翻译，否则停在「待手动加载」，避免默认吃掉内存 */
+function maybePrepare() {
+  if (!chunks.value.length) return
+  if (activated.value) prepare()
+  else status.value = 'manual'
+}
+
+/** 用户点击「加载并翻译」：首次激活模型加载 */
+function startManual() {
+  activated.value = true
+  prepare()
+}
+
 async function runTranslate() {
   const engine = getEngine()
   status.value = 'translating'
@@ -132,7 +150,7 @@ watch(
     modelPct.value = 0
     detectedSource.value = ''
     status.value = 'idle'
-    if (chunks.value.length) prepare()
+    maybePrepare()
   },
   { immediate: true },
 )
@@ -146,7 +164,7 @@ function onSourceModeChange() {
     c.state = 'pending'
   })
   progress.value = { done: 0, total: chunks.value.length }
-  if (chunks.value.length) prepare()
+  maybePrepare()
 }
 
 onBeforeUnmount(() => {
@@ -188,6 +206,12 @@ defineExpose({ setScrollRatio, getRatio, status })
       :class="{ 'status-bar--warn': status === 'unsupported' || status === 'no-model' }"
     >
       <template v-if="status === 'idle'">待启动…</template>
+      <template v-else-if="status === 'manual'">
+        翻译模型未加载（约 600MB，加载后会占用较多内存）
+        <el-button size="small" type="primary" class="load-btn" @click="startManual">
+          加载并翻译
+        </el-button>
+      </template>
       <template v-else-if="status === 'detecting'">
         正在识别源语言…
         <span v-if="detectedSource" class="lang-tag">检测到：{{ langLabel(detectedSource) }}</span>
@@ -280,6 +304,11 @@ defineExpose({ setScrollRatio, getRatio, status })
 .lang-select {
   margin-left: 10px;
   width: 110px;
+  vertical-align: middle;
+}
+
+.load-btn {
+  margin-left: 10px;
   vertical-align: middle;
 }
 

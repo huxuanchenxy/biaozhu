@@ -12,6 +12,15 @@ import type { Annotation, Label } from '@/types/annotation'
 const DOC_URL = import.meta.env.VITE_APP_DOC_URL || '/doc/BE1020801A3.md'
 
 /**
+ * 是否默认自动加载本地翻译模型（NLLB-200，约 600MB）。
+ * 关闭时（默认）进入「翻译」页不会立即占用内存，需手动点按钮加载。
+ * 通过 .env 里的 VITE_APP_TRANSLATION_AUTOLOAD 控制。
+ */
+const TRANSLATION_AUTOLOAD = ['true', '1', 'yes', 'on'].includes(
+  String(import.meta.env.VITE_APP_TRANSLATION_AUTOLOAD ?? '').trim().toLowerCase(),
+)
+
+/**
  * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步；
  * 翻译模式下预览与译文并排且滚动同步。
  * 需要恢复编辑能力时，把 'edit' 加回来并接上下面的编辑区即可。
@@ -282,6 +291,7 @@ const stats = computed(() => {
           <MarkdownTranslation
             ref="translationRef"
             :content="content"
+            :autoload="TRANSLATION_AUTOLOAD"
             @scroll="onTranslationScroll"
           />
         </div>

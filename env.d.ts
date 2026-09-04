@@ -12,6 +12,8 @@ interface ImportMetaEnv {
   readonly VITE_ROUTER_MODE: string
   /** 待标注文档地址（本地文件或后端接口） */
   readonly VITE_APP_DOC_URL: string
+  /** 是否默认自动加载本地翻译模型：true 自动预热 / false 进入翻译页手动加载（省内存） */
+  readonly VITE_APP_TRANSLATION_AUTOLOAD: string
   /** 开发代理目标地址 */
   readonly VITE_PROXY_TARGET: string
   /** 开发服务器端口 */
