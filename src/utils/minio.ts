@@ -75,6 +75,14 @@ export function isMinioConfigured(): boolean {
 }
 
 /**
+ * 拼出后端 uploadOverwrite 接口需要的完整对象路径：/<bucket>/<key>（含桶名前缀与开头斜杠，空格等保持原样不编码）。
+ * 例：key='a/b/Cot/x.json' -> '/drivdernet_abc/a/b/Cot/x.json'
+ */
+export function fullObjectPath(key: string): string {
+  return `/${MINIO_BUCKET}/${normalizeObjectKey(key)}`
+}
+
+/**
  * 按对象 key 读取 MinIO 中的文本内容（如 md 原文）。
  * 走同源请求，由服务端签名服务转发 MinIO。
  * @param key 桶内对象路径（不含桶名），例如 'a/b/c.md'

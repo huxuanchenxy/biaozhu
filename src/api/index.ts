@@ -4,7 +4,7 @@
  * 路径不用写 /api 前缀，request 已统一加了 baseURL
  */
 import http from '@/utils/request'
-import { getObjectText } from '@/utils/minio'
+import { fullObjectPath, getObjectText } from '@/utils/minio'
 import type { DocJsonRecord, SessionItem, SkillItem } from './types'
 
 /* ------------------------------ 会话相关 ------------------------------ */
@@ -71,9 +71,25 @@ export async function getMinioDocJson(key: string): Promise<DocJsonRecord[]> {
 }
 
 /**
- * 保存标注结果：上传当前标签页的整个 json。
- * TODO: 后端接口尚未提供，先模拟成功；接口就绪后改成 http.post(`/doc/${fileName}`, data) 之类
+ * 上传覆盖 MinIO 上的 json 对象（后端 POST /api/file/uploadOverwrite）。
+ * multipart/form-data：file=当前编辑的整个 json 文件，fullObjectPath=/<bucket>/<key>。
  */
-export function saveDocJson(_fileName: string, _data: DocJsonRecord[]): Promise<void> {
+export async function uploadOverwriteJson(fullPath: string, data: DocJsonRecord[]): Promise<void> {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const fileName = fullPath.split('/').pop() || 'data.json'
+  const file = new File([blob], fileName, { type: 'application/json' })
+  await http.upload<any>('/file/uploadOverwrite', file, { fullObjectPath: fullPath })
+}
+
+/**
+ * 保存标注结果：上传当前标签页的整个 json。
+ * MinIO 模式（传 minioKey）调 uploadOverwrite 覆盖写回原对象；
+ * 本地回退模式（无 minioKey）暂无写接口，模拟成功。
+ */
+export async function saveDocJson(_fileName: string, data: DocJsonRecord[], minioKey?: string): Promise<void> {
+  if (minioKey) {
+    await uploadOverwriteJson(fullObjectPath(minioKey), data)
+    return
+  }
   return Promise.resolve()
 }

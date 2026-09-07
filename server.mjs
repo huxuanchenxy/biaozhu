@@ -56,6 +56,9 @@ const MINIO_SECRET_KEY =
   process.env.MINIO_SECRET_KEY || fileEnv.MINIO_SECRET_KEY || fileEnv.VITE_MINIO_SECRET_KEY || ''
 const BUCKET =
   process.env.MINIO_BUCKET || fileEnv.MINIO_BUCKET || fileEnv.VITE_MINIO_BUCKET || 'drivdernet_abc'
+// 后端服务地址（生产把 /api/... 反代到它，保存 json 用）：环境变量 > .env > 默认
+const API_TARGET =
+  process.env.API_TARGET || fileEnv.API_TARGET || fileEnv.VITE_PROXY_TARGET || 'http://10.89.34.77:8080'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -210,6 +213,31 @@ async function proxyToMinio(req, res) {
   pipeUpstream(upstream, res)
 }
 
+/** 普通反向代理：把 /api/... 透传到后端（保存 json 的 uploadOverwrite 走这里），不改路径 */
+function proxyToApi(req, res) {
+  const target = new URL(API_TARGET)
+  const headers = { ...req.headers, host: target.host }
+  const proxyReq = http.request(
+    {
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      method: req.method,
+      path: req.url,
+      headers,
+    },
+    (up) => {
+      res.writeHead(up.statusCode || 502, up.headers)
+      up.pipe(res)
+    },
+  )
+  proxyReq.on('error', (e) => {
+    if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end(`后端代理错误：${e.message}`)
+  })
+  req.pipe(proxyReq)
+}
+
 /* ---------------- 静态文件服务 ---------------- */
 /** 静态文件服务；找不到时回退 index.html（hash 路由 SPA） */
 function sendStatic(res, urlPath) {
@@ -243,6 +271,11 @@ function sendStatic(res, urlPath) {
 
 const server = http.createServer((req, res) => {
   const urlPath = (req.url || '/').split('?')[0]
+  // 后端接口（保存 json 等）：普通反代，不签名
+  if (urlPath === '/api' || urlPath.startsWith('/api/')) {
+    proxyToApi(req, res)
+    return
+  }
   const isMinioRoute = urlPath === `/${BUCKET}` || urlPath.startsWith(`/${BUCKET}/`)
   if (isMinioRoute && req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -264,4 +297,5 @@ server.listen(PORT, () => {
   console.log(`[server] 静态目录: ${DIST}`)
   console.log(`[server] 监听端口: ${PORT}`)
   console.log(`[server] 代理 /${BUCKET}/* -> ${MINIO_ENDPOINT}（服务端 SigV4 签名，时钟自动校正）`)
+  console.log(`[server] 代理 /api/* -> ${API_TARGET}（普通反代，保存 json）`)
 })

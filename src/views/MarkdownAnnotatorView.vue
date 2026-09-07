@@ -209,7 +209,7 @@ function cancelEdit() {
   editingIndex.value = -1
 }
 
-/** 保存单条 Q&A：写回当前标签页数据后上传整个标签页的 json（接口未接，api 层先模拟） */
+/** 保存单条 Q&A：写回当前标签页数据后，MinIO 模式调 uploadOverwrite 上传整个标签页 json */
 async function saveEdit() {
   const tab = activeTab.value
   const rec = tab.records[editingIndex.value]
@@ -221,8 +221,9 @@ async function saveEdit() {
   rec[tab.aField] = editA.value
   saving.value = true
   try {
-    await saveDocJson(tab.file, tab.records)
-    ElMessage.success('已保存（上传接口未接，暂为本地修改）')
+    const keys = annotationKeys.value
+    await saveDocJson(tab.file, tab.records, keys ? keys[tab.minioField] : undefined)
+    ElMessage.success(keys ? '已保存' : '已保存（本地模式，未上传）')
     editingIndex.value = -1
   } catch (e: any) {
     ElMessage.error(`保存失败：${e?.message ?? '未知错误'}`)
