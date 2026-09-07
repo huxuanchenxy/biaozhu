@@ -1,6 +1,25 @@
+import { copyFileSync, existsSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
+
+/**
+ * 构建后把 server.mjs 与 .env.production 拷进 dist：
+ * 部署时整个 dist 带走即可，无需手动拷贝；
+ * server.mjs 运行时会读 dist 里的 .env.production 取 MinIO 地址，改配置只需改 .env.production 再 build。
+ */
+function copyRuntimeFiles(outDir: string) {
+  return {
+    name: 'copy-runtime-files',
+    closeBundle() {
+      for (const file of ['server.mjs', '.env.production']) {
+        const src = fileURLToPath(new URL(`./${file}`, import.meta.url))
+        const dest = fileURLToPath(new URL(`./${outDir}/${file}`, import.meta.url))
+        if (existsSync(src)) copyFileSync(src, dest)
+      }
+    },
+  }
+}
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
@@ -8,7 +27,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_')
 
   return {
-    plugins: [vue()],
+    plugins: [vue(), copyRuntimeFiles(env.VITE_OUT_DIR || 'dist')],
 
     resolve: {
       alias: {
