@@ -55,6 +55,8 @@ function getClient(): S3Client {
  * 规范化对象 key：
  *   - 去掉开头的 '/'（S3 key 不以 / 开头）
  *   - 若 URL 里带上了桶名前缀（如 /drivdernet_abc/xxx），自动剥掉桶名
+ * 注意：这里**不**折叠重复斜杠。对象 key 可能真实包含空目录段（'a//b'，
+ * 即 MinIO 里名为 '/' 的空文件夹），折叠会指向一个不存在的 key。
  * 例：'/drivdernet_abc/a/b.md' -> 'a/b.md'
  */
 export function normalizeObjectKey(raw: string): string {
@@ -63,6 +65,37 @@ export function normalizeObjectKey(raw: string): string {
     key = key.slice(MINIO_BUCKET.length).replace(/^\/+/, '')
   }
   return key
+}
+
+/**
+ * 由 md 的 object key 推导三个标注 json 的 object key。
+ *
+ * 目录规则（QA / SFT / CoT 三个文件夹名固定，与 MD 同级）：
+ *   md      : <parent>/MD/<name>.md
+ *   qa      : <parent>/QA/<name>_qa.json
+ *   alpaca  : <parent>/SFT/<name>_alpaca.json
+ *   cot     : <parent>/CoT/<name>_cot.json
+ * 其中 <parent> 是 MD 文件夹的上一级，<name> 是 md 文件名（去掉 .md 扩展名）。
+ * 文件夹名固定，里面的文件名随 <name> 变，故按同一 <name> 拼接后缀即可。
+ */
+export function deriveAnnotationKeys(mdKey: string): {
+  qa: string
+  alpaca: string
+  cot: string
+} {
+  const key = normalizeObjectKey(mdKey).replace(/\\/g, '/')
+  const slash = key.lastIndexOf('/')
+  const mdDir = slash >= 0 ? key.slice(0, slash) : '' // <parent>/MD
+  const parentSlash = mdDir.lastIndexOf('/')
+  const parent = parentSlash >= 0 ? mdDir.slice(0, parentSlash) : '' // <parent>
+  const fileName = slash >= 0 ? key.slice(slash + 1) : key // <name>.md
+  const name = fileName.replace(/\.md$/i, '') // <name>
+  const prefix = parent ? `${parent}/` : ''
+  return {
+    qa: `${prefix}QA/${name}_qa.json`,
+    alpaca: `${prefix}SFT/${name}_alpaca.json`,
+    cot: `${prefix}CoT/${name}_cot.json`,
+  }
 }
 
 /** 是否已具备访问 MinIO 的必要配置 */
@@ -83,6 +116,14 @@ export async function getObjectText(key: string): Promise<string> {
   }
   const objectKey = normalizeObjectKey(key)
   if (!objectKey) throw new Error('对象路径为空')
+  // 空目录段（连续 '//'）是数据问题：MinIO 的 S3 路由会归一化重复斜杠，
+  // 导致「签名用的路径」与「实际查找的路径」不一致（SignatureDoesNotMatch / NoSuchKey）。
+  // 这里提前拦截并给出可操作的提示，避免暴露难懂的签名错误。
+  if (objectKey.includes('//')) {
+    throw new Error(
+      `对象路径含空目录段（连续 "//"）：${objectKey}。MinIO 无法通过 S3 接口直接读取该对象，请先在 MinIO 中修正对象 key（去掉空目录）后重试。`,
+    )
+  }
 
   const res = await getClient().send(
     new GetObjectCommand({ Bucket: MINIO_BUCKET, Key: objectKey }),

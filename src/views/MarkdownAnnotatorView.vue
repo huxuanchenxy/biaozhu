@@ -4,9 +4,9 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import MarkdownTranslation from '@/components/MarkdownTranslation.vue'
-import { getDocJson, saveDocJson } from '@/api'
+import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
-import { getObjectText } from '@/utils/minio'
+import { deriveAnnotationKeys, getObjectText } from '@/utils/minio'
 
 /**
  * 待标注文档地址。
@@ -23,6 +23,12 @@ const docKey = computed(() => {
   const key = Array.isArray(raw) ? raw.join('/') : String(raw ?? '')
   return key.trim()
 })
+
+/**
+ * 由 md 的 key 推导三个标注 json 的 MinIO key；无 docKey（回退本地）时为 null。
+ * 规则见 utils/minio 的 deriveAnnotationKeys：QA/SFT/CoT 与 MD 同级，文件名同 md 主名加后缀。
+ */
+const annotationKeys = computed(() => (docKey.value ? deriveAnnotationKeys(docKey.value) : null))
 
 /**
  * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步；
@@ -64,9 +70,6 @@ async function loadDoc() {
 
 loadDoc()
 
-/** URL 上的对象路径变化时重新拉取（同一组件复用，不重新挂载） */
-watch(docKey, () => loadDoc())
-
 /** ---------- 标注数据（Q&A 标签页） ---------- */
 
 /**
@@ -76,8 +79,10 @@ watch(docKey, () => loadDoc())
 interface QaTab {
   key: string
   label: string
-  /** public/doc 下的 json 文件名 */
+  /** public/doc 下的本地回退 json 文件名（无 docKey 时用） */
   file: string
+  /** 对应 annotationKeys 里的字段：MinIO 动态读取时用它取推导出的 key */
+  minioField: 'qa' | 'alpaca' | 'cot'
   /** 问槽位展示的字段 */
   qField: string
   /** 答槽位展示的字段 */
@@ -92,6 +97,7 @@ const tabs = ref<QaTab[]>([
     key: 'alpaca',
     label: 'Alpaca',
     file: 'BE1020801A3_alpaca.json',
+    minioField: 'alpaca',
     qField: 'instruction',
     aField: 'output',
     status: 'loading',
@@ -102,6 +108,7 @@ const tabs = ref<QaTab[]>([
     key: 'cot',
     label: 'COT',
     file: 'BE1020801A3_cot.json',
+    minioField: 'cot',
     qField: 'question',
     aField: 'scenario',
     status: 'loading',
@@ -112,6 +119,7 @@ const tabs = ref<QaTab[]>([
     key: 'qa',
     label: 'QA',
     file: 'BE1020801A3_qa.json',
+    minioField: 'qa',
     qField: 'question',
     aField: 'answer',
     status: 'loading',
@@ -125,18 +133,21 @@ const activeTab = computed(
   () => tabs.value.find((t) => t.key === activeTabKey.value) ?? tabs.value[0],
 )
 
-/** 进入页面并行加载三个标签页：目前读本地 json，后续换接口只改 api 层 */
+/** 加载单个标签页：URL 带 key 走 MinIO（按 md 名推导 json key），否则读本地 json */
 function loadTab(tab: QaTab) {
   tab.status = 'loading'
   tab.error = ''
-  getDocJson(tab.file)
+  const keys = annotationKeys.value
+  const source = keys ? keys[tab.minioField] : tab.file
+  const task = keys ? getMinioDocJson(keys[tab.minioField]) : getDocJson(tab.file)
+  task
     .then((records) => {
       tab.records = records
       tab.status = 'ok'
     })
     .catch((e: any) => {
       tab.records = []
-      tab.error = `${tab.file} 加载失败：${e?.message ?? '未知错误'}`
+      tab.error = `${source} 加载失败：${e?.message ?? '未知错误'}`
       tab.status = 'error'
     })
 }
@@ -168,6 +179,17 @@ watch(activeTabKey, () => {
 })
 watch([currentPage, pageSize], () => {
   editingIndex.value = -1
+})
+
+/**
+ * URL 上的对象路径变化时：md 与三个标注 json 一起重新拉取，
+ * 并回到第 1 页、放弃进行中的编辑（同一组件复用不重新挂载，故手动重载）。
+ */
+watch(docKey, () => {
+  currentPage.value = 1
+  editingIndex.value = -1
+  loadDoc()
+  tabs.value.forEach(loadTab)
 })
 
 function fieldText(rec: DocJsonRecord, field: string) {

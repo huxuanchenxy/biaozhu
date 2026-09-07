@@ -4,6 +4,7 @@
  * 路径不用写 /api 前缀，request 已统一加了 baseURL
  */
 import http from '@/utils/request'
+import { getObjectText } from '@/utils/minio'
 import type { DocJsonRecord, SessionItem, SkillItem } from './types'
 
 /* ------------------------------ 会话相关 ------------------------------ */
@@ -36,14 +37,10 @@ export const uploadFile = (file: File) => http.upload<any>('/file/upload/batch',
 /* ------------------------------ 标注数据 ------------------------------ */
 
 /**
- * 拉取标注数据 json 并做合格性校验（能解析成 JSON、顶层是对象数组）。
- * 目前读 public/doc 下的本地文件，后续换后端接口只改这里，视图层不动。
+ * 解析并校验标注 json 文本：能解析成 JSON、顶层是对象数组、元素均为对象。
+ * 本地与 MinIO 两种来源共用同一套校验规则。
  */
-export async function getDocJson(fileName: string): Promise<DocJsonRecord[]> {
-  const res = await fetch(`/doc/${fileName}`)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const text = await res.text()
-
+function parseDocJson(text: string): DocJsonRecord[] {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -55,6 +52,22 @@ export async function getDocJson(fileName: string): Promise<DocJsonRecord[]> {
     throw new Error('数组元素存在非对象项')
   }
   return parsed as DocJsonRecord[]
+}
+
+/**
+ * 拉取标注数据 json（本地 public/doc）。后续换后端接口只改这里，视图层不动。
+ */
+export async function getDocJson(fileName: string): Promise<DocJsonRecord[]> {
+  const res = await fetch(`/doc/${fileName}`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return parseDocJson(await res.text())
+}
+
+/**
+ * 从 MinIO 按 object key 拉取标注数据 json，校验规则与本地一致。
+ */
+export async function getMinioDocJson(key: string): Promise<DocJsonRecord[]> {
+  return parseDocJson(await getObjectText(key))
 }
 
 /**
