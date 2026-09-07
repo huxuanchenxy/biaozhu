@@ -44,7 +44,7 @@ export function normalizeObjectKey(raw: string): string {
  * 目录规则（QA / SFT / CoT 三个文件夹名固定，与 MD 同级）：
  *   md      : <parent>/MD/<name>.md
  *   qa      : <parent>/QA/<name>_qa.json
- *   alpaca  : <parent>/SFT/<name>_alpaca.json
+ *   alpaca  : <parent>/SFT/<name>_sft.json
  *   cot     : <parent>/CoT/<name>_cot.json
  * 其中 <parent> 是 MD 文件夹的上一级，<name> 是 md 文件名（去掉 .md 扩展名）。
  * 文件夹名固定，里面的文件名随 <name> 变，故按同一 <name> 拼接后缀即可。
@@ -64,7 +64,7 @@ export function deriveAnnotationKeys(mdKey: string): {
   const prefix = parent ? `${parent}/` : ''
   return {
     qa: `${prefix}QA/${name}_qa.json`,
-    alpaca: `${prefix}SFT/${name}_alpaca.json`,
+    alpaca: `${prefix}SFT/${name}_sft.json`,
     cot: `${prefix}CoT/${name}_cot.json`,
   }
 }

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { MdPreview } from 'md-editor-v3'
+import 'md-editor-v3/lib/preview.css'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
-import MarkdownTranslation from '@/components/MarkdownTranslation.vue'
 import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
 import { deriveAnnotationKeys, getObjectText } from '@/utils/minio'
+import { TranslationEngine } from '@/utils/translator'
 
 /**
  * 待标注文档地址。
@@ -31,11 +33,11 @@ const docKey = computed(() => {
 const annotationKeys = computed(() => (docKey.value ? deriveAnnotationKeys(docKey.value) : null))
 
 /**
- * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步；
- * 翻译模式下预览与译文并排且滚动同步。
+ * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步。
+ * 翻译改为「选中一段再译」（见下方选段翻译），不再有整篇翻译页签。
  * 需要恢复编辑能力时，把 'edit' 加回来并接上下面的编辑区即可。
  */
-type ViewMode = 'preview' | 'split' | 'source' | 'translate'
+type ViewMode = 'preview' | 'split' | 'source'
 const viewMode = ref<ViewMode>('preview')
 
 /* ------------------------------------------------------------------
@@ -95,7 +97,7 @@ interface QaTab {
 const tabs = ref<QaTab[]>([
   {
     key: 'alpaca',
-    label: 'Alpaca',
+    label: 'SFT',
     file: 'BE1020801A3_alpaca.json',
     minioField: 'alpaca',
     qField: 'instruction',
@@ -234,9 +236,8 @@ async function saveEdit() {
 
 const previewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
 
-/** ---------- 预览 / 原文 / 翻译 滚动同步 ---------- */
+/** ---------- 预览 / 原文 滚动同步 ---------- */
 const sourceRef = ref<HTMLElement | null>(null)
-const translationRef = ref<InstanceType<typeof MarkdownTranslation> | null>(null)
 /** 最近一次滚动比例，切换模式时用来把位置带过去 */
 const lastRatio = ref(0)
 
@@ -244,7 +245,7 @@ const lastRatio = ref(0)
  * 谁在主动滚。被动那一方设置 scrollTop 也会触发 scroll 事件，
  * 不锁住的话两边会互相拉扯，出现抖动。
  */
-let syncOwner: 'preview' | 'source' | 'translation' | null = null
+let syncOwner: 'preview' | 'source' | null = null
 let syncTimer: ReturnType<typeof setTimeout> | undefined
 
 function setScrollRatio(el: HTMLElement | null, ratio: number) {
@@ -255,11 +256,10 @@ function setScrollRatio(el: HTMLElement | null, ratio: number) {
 
 /**
  * 各模式下只允许两端互相同步：
- *   split      ↔ preview ↔ source
- *   translate  ↔ preview ↔ translation
+ *   split ↔ preview ↔ source
  * 单栏模式只记录 lastRatio，不同步。
  */
-function syncScroll(from: 'preview' | 'source' | 'translation', ratio: number) {
+function syncScroll(from: 'preview' | 'source', ratio: number) {
   lastRatio.value = ratio
   if (syncOwner && syncOwner !== from) return
   syncOwner = from
@@ -272,22 +272,16 @@ function syncScroll(from: 'preview' | 'source' | 'translation', ratio: number) {
   if (viewMode.value === 'split') {
     if (from === 'preview') setScrollRatio(sourceRef.value, ratio)
     else if (from === 'source') previewRef.value?.setScrollRatio(ratio)
-  } else if (viewMode.value === 'translate') {
-    if (from === 'preview') translationRef.value?.setScrollRatio(ratio)
-    else if (from === 'translation') previewRef.value?.setScrollRatio(ratio)
   }
 }
 
 function onPreviewScroll(ratio: number) {
+  hideSelBtn()
   syncScroll('preview', ratio)
 }
 
 function onSourceScroll() {
   syncScroll('source', getRatio(sourceRef.value))
-}
-
-function onTranslationScroll(ratio: number) {
-  syncScroll('translation', ratio)
 }
 
 function getRatio(el: HTMLElement | null) {
@@ -302,15 +296,81 @@ watch(viewMode, (mode) => {
     if (mode === 'split') {
       previewRef.value?.setScrollRatio(lastRatio.value)
       setScrollRatio(sourceRef.value, lastRatio.value)
-    } else if (mode === 'translate') {
-      previewRef.value?.setScrollRatio(lastRatio.value)
-      translationRef.value?.setScrollRatio(lastRatio.value)
     } else if (mode === 'preview') {
       previewRef.value?.setScrollRatio(lastRatio.value)
     } else if (mode === 'source') {
       setScrollRatio(sourceRef.value, lastRatio.value)
     }
   })
+})
+
+/* ------------------------------------------------------------------
+ * 选段翻译：在预览里划选一段 → 选区上方浮现「翻译」按钮 → 弹窗展示该段译文。
+ * 取代原来的整篇翻译（太慢），只把选中片段提交给 Dify。
+ * ------------------------------------------------------------------ */
+const engine = new TranslationEngine()
+/** 当前划选的文本 */
+const selText = ref('')
+/** 浮动「翻译」按钮位置（fixed 视口坐标）与显隐 */
+const selBtn = ref({ show: false, x: 0, y: 0 })
+/** 译文弹窗 */
+const transDialog = ref(false)
+const transState = ref<'loading' | 'done' | 'error'>('loading')
+const transResult = ref('')
+const transError = ref('')
+
+/** 预览里划选到文本：记录选文并在选区上方浮现翻译按钮 */
+function onPreviewSelect(text: string) {
+  selText.value = text
+  const sel = window.getSelection()
+  const rect = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null
+  const x = rect ? Math.min(Math.max(rect.left + rect.width / 2 - 28, 8), window.innerWidth - 72) : 8
+  const y = rect ? Math.max(rect.top - 36, 8) : 8
+  selBtn.value = { show: true, x, y }
+}
+
+/** 隐藏浮动按钮（滚动 / 选区清空 / 开始翻译时） */
+function hideSelBtn() {
+  selBtn.value.show = false
+}
+
+/** 点击浮动按钮 / 重试：把选中片段提交 Dify 翻译 */
+async function translateSelection() {
+  const text = selText.value
+  if (!text) return
+  hideSelBtn()
+  transDialog.value = true
+  transState.value = 'loading'
+  transResult.value = ''
+  transError.value = ''
+  try {
+    transResult.value = await engine.translate(text)
+    transState.value = 'done'
+  } catch (e: any) {
+    if (e?.name === 'AbortError') return
+    transState.value = 'error'
+    transError.value = e?.message ?? '翻译失败'
+  }
+}
+
+async function copyTranslation() {
+  try {
+    await navigator.clipboard.writeText(transResult.value)
+    ElMessage.success('译文已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动选择复制')
+  }
+}
+
+/** 选区被清空时收起浮动按钮（点按钮时选区仍在，不会误收） */
+function onDocMouseUp() {
+  if (!(window.getSelection()?.toString().trim() ?? '')) hideSelBtn()
+}
+
+onMounted(() => document.addEventListener('mouseup', onDocMouseUp))
+onBeforeUnmount(() => {
+  document.removeEventListener('mouseup', onDocMouseUp)
+  engine.destroy()
 })
 </script>
 
@@ -324,7 +384,6 @@ watch(viewMode, (mode) => {
         <el-radio-group v-model="viewMode" size="small">
           <el-radio-button value="preview">预览</el-radio-button>
           <el-radio-button value="split">分栏</el-radio-button>
-          <el-radio-button value="translate">翻译</el-radio-button>
           <el-radio-button value="source">原文</el-radio-button>
         </el-radio-group>
       </header>
@@ -349,6 +408,7 @@ watch(viewMode, (mode) => {
           v-loading="loading"
           :content="content"
           @scroll="onPreviewScroll"
+          @select="onPreviewSelect"
         />
 
         <!-- 原文只读查看：用 v-show 保住预览区 DOM，切回来时高亮和滚动位置都还在 -->
@@ -358,16 +418,6 @@ watch(viewMode, (mode) => {
           :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
           @scroll.passive="onSourceScroll"
         >{{ content }}</pre>
-
-        <!-- 翻译视图：仅当切到「翻译」页签时才提交 Dify 整篇翻译（进入页面不自动翻译） -->
-        <div v-show="viewMode === 'translate'" class="md-translation-host">
-          <MarkdownTranslation
-            ref="translationRef"
-            :content="content"
-            :active="viewMode === 'translate'"
-            @scroll="onTranslationScroll"
-          />
-        </div>
       </div>
     </section>
 
@@ -451,6 +501,46 @@ watch(viewMode, (mode) => {
         />
       </footer>
     </section>
+
+    <!-- 选段翻译：划选后浮现的按钮（teleport 到 body，fixed 定位）+ 译文弹窗 -->
+    <teleport to="body">
+      <button
+        v-show="selBtn.show"
+        class="sel-translate-btn"
+        :style="{ left: selBtn.x + 'px', top: selBtn.y + 'px' }"
+        @click="translateSelection"
+      >
+        翻译
+      </button>
+    </teleport>
+
+    <el-dialog v-model="transDialog" title="选段翻译" width="720px" top="8vh">
+      <div class="trans-label">原文（{{ selText.length }} 字）</div>
+      <pre class="trans-src">{{ selText }}</pre>
+      <div class="trans-label">译文</div>
+      <div v-if="transState === 'loading'" class="trans-loading">
+        <el-icon class="is-loading"><Loading /></el-icon> 正在翻译…
+      </div>
+      <div v-else-if="transState === 'error'" class="trans-error">
+        <span>{{ transError }}</span>
+        <el-button size="small" type="primary" @click="translateSelection">重试</el-button>
+      </div>
+      <MdPreview
+        v-else
+        class="trans-out"
+        :model-value="transResult"
+        preview-theme="github"
+        theme="light"
+        language="zh-CN"
+        :no-katex="true"
+        :no-mermaid="true"
+        :no-highlight="true"
+      />
+      <template #footer>
+        <el-button @click="transDialog = false">关闭</el-button>
+        <el-button type="primary" :disabled="transState !== 'done'" @click="copyTranslation">复制译文</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -641,5 +731,58 @@ watch(viewMode, (mode) => {
   flex: none;
   padding: 8px 16px;
   border-top: 1px solid #ebeef5;
+}
+/* ---------- 选段翻译 ---------- */
+.sel-translate-btn {
+  position: fixed;
+  z-index: 3000;
+  padding: 2px 12px;
+  font-size: 12px;
+  line-height: 20px;
+  color: #fff;
+  background: #409eff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.sel-translate-btn:hover {
+  background: #66b1ff;
+}
+.trans-label {
+  margin: 4px 0 6px;
+  font-size: 12px;
+  color: #909399;
+}
+.trans-src {
+  max-height: 140px;
+  overflow: auto;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+.trans-loading {
+  padding: 12px 0;
+  font-size: 13px;
+  color: #909399;
+}
+.trans-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  font-size: 13px;
+  color: #f56c6c;
+}
+.trans-out {
+  max-height: 50vh;
+  overflow: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
 }
 </style>
