@@ -1,16 +1,28 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import MarkdownTranslation from '@/components/MarkdownTranslation.vue'
 import { getDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
+import { getObjectText } from '@/utils/minio'
 
 /**
  * 待标注文档地址。
- * 现在指向 public/doc 下的本地文件，后续换成后端接口时只改 .env 里的 VITE_APP_DOC_URL 即可。
+ * 优先从 URL 路由参数取 MinIO 对象路径（/markdown/<key>）；
+ * 没有带 key 时回退到 .env 里 VITE_APP_DOC_URL 指向的本地文件。
  */
 const DOC_URL = import.meta.env.VITE_APP_DOC_URL || '/doc/BE1020801A3.md'
+
+const route = useRoute()
+
+/** 当前路由携带的 MinIO 对象 key（:key(.*) 一般为字符串，兼容数组情况） */
+const docKey = computed(() => {
+  const raw = route.params.key
+  const key = Array.isArray(raw) ? raw.join('/') : String(raw ?? '')
+  return key.trim()
+})
 
 /**
  * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步；
@@ -31,14 +43,18 @@ const content = ref('')
 const loading = ref(false)
 const loadError = ref('')
 
-/** 拉取文档：以后换成接口也走这里，页面其它部分不用动 */
+/** 拉取文档：URL 带 key 走 MinIO，否则读本地 VITE_APP_DOC_URL；页面其它部分不用动 */
 async function loadDoc() {
   loading.value = true
   loadError.value = ''
   try {
-    const res = await fetch(DOC_URL)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    content.value = await res.text()
+    if (docKey.value) {
+      content.value = await getObjectText(docKey.value)
+    } else {
+      const res = await fetch(DOC_URL)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      content.value = await res.text()
+    }
   } catch (e: any) {
     loadError.value = `文档加载失败：${e?.message ?? '未知错误'}`
   } finally {
@@ -47,6 +63,9 @@ async function loadDoc() {
 }
 
 loadDoc()
+
+/** URL 上的对象路径变化时重新拉取（同一组件复用，不重新挂载） */
+watch(docKey, () => loadDoc())
 
 /** ---------- 标注数据（Q&A 标签页） ---------- */
 

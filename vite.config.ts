@@ -28,6 +28,17 @@ export default defineConfig(({ mode }) => {
           // 如果后端接口本身不带 /api 前缀，放开下面这行去掉前缀
           // rewrite: (path) => path.replace(new RegExp(`^${env.VITE_APP_BASE_API || '/api'}`), ''),
         },
+        // MinIO 反向代理：把 /<bucket>/... 转发到真实 MinIO，让浏览器视为同源以绕过 CORS。
+        // 关键：changeOrigin 必须为 false 且不重写路径，否则 Host/路径变化会导致 S3 的 SigV4 签名校验失败。
+        ...(env.VITE_MINIO_BUCKET && env.VITE_MINIO_ENDPOINT
+          ? {
+              [`/${env.VITE_MINIO_BUCKET}`]: {
+                target: env.VITE_MINIO_ENDPOINT,
+                changeOrigin: false,
+                secure: false,
+              },
+            }
+          : {}),
       },
     },
 

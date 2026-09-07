@@ -10,6 +10,7 @@
     "fetch:model": "node scripts/download-model.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
     "@element-plus/icons-vue": "^2.3.1",
     "@huggingface/hub": "^2.16.3",
     "@huggingface/transformers": "^4.2.0",

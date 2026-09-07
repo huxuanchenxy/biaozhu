@@ -31,6 +31,17 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Markdown 标注', hideNav: true },
   },
   {
+    /**
+     * 带 MinIO 对象路径的标注页：/markdown/<object key>
+     * :key(.*) 通配剩余全部路径（含 '/'、中文、空格等），key 即桶内对象路径。
+     * 例：#/markdown/drivdernet_abc/P2024112600002_ 工业/.../xxx.md
+     */
+    path: '/markdown/:key(.*)',
+    name: 'MarkdownAnnotatorDoc',
+    component: () => import('@/views/MarkdownAnnotatorView.vue'),
+    meta: { title: 'Markdown 标注', hideNav: true },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/views/NotFoundView.vue'),

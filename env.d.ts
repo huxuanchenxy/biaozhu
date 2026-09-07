@@ -20,6 +20,16 @@ interface ImportMetaEnv {
   readonly VITE_DIFY_USER: string
   /** Dify workflow 开始节点的输入变量名（md 原文放入 inputs[该 key]） */
   readonly VITE_DIFY_INPUT_KEY: string
+  /** MinIO 服务地址 */
+  readonly VITE_MINIO_ENDPOINT: string
+  /** MinIO 访问密钥（Access Key） */
+  readonly VITE_MINIO_ACCESS_KEY: string
+  /** MinIO 私密密钥（Secret Key） */
+  readonly VITE_MINIO_SECRET_KEY: string
+  /** MinIO 存储桶名称 */
+  readonly VITE_MINIO_BUCKET: string
+  /** 是否走同源反向代理访问 MinIO（dev: Vite；prod: Nginx），绕过浏览器 CORS */
+  readonly VITE_MINIO_USE_PROXY: string
   /** 开发代理目标地址 */
   readonly VITE_PROXY_TARGET: string
   /** 开发服务器端口 */
