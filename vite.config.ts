@@ -47,13 +47,14 @@ export default defineConfig(({ mode }) => {
           // 如果后端接口本身不带 /api 前缀，放开下面这行去掉前缀
           // rewrite: (path) => path.replace(new RegExp(`^${env.VITE_APP_BASE_API || '/api'}`), ''),
         },
-        // MinIO 反向代理：把 /<bucket>/... 转发到真实 MinIO，让浏览器视为同源以绕过 CORS。
-        // 关键：changeOrigin 必须为 false 且不重写路径，否则 Host/路径变化会导致 S3 的 SigV4 签名校验失败。
-        ...(env.VITE_MINIO_BUCKET && env.VITE_MINIO_ENDPOINT
+        // MinIO 反向代理（开发）：把 /<bucket>/... 转发到本地签名服务 server.mjs（由 npm run dev 自动拉起）。
+        // 这一跳浏览器->签名服务是「无签名」的，Host/路径怎么变都不影响签名；
+        // 真正的 SigV4 由 server.mjs 用服务端时钟对 MinIO 重新签名，故此处无需保留 Host。
+        ...(env.VITE_MINIO_BUCKET
           ? {
               [`/${env.VITE_MINIO_BUCKET}`]: {
-                target: env.VITE_MINIO_ENDPOINT,
-                changeOrigin: false,
+                target: env.VITE_MINIO_SIGNER || 'http://127.0.0.1:3345',
+                changeOrigin: true,
                 secure: false,
               },
             }

@@ -358,11 +358,12 @@ watch(viewMode, (mode) => {
           @scroll.passive="onSourceScroll"
         >{{ content }}</pre>
 
-        <!-- 翻译视图：读取 md 后自动提交 Dify workflow 整篇翻译，翻译中显示等待提示 -->
+        <!-- 翻译视图：仅当切到「翻译」页签时才提交 Dify 整篇翻译（进入页面不自动翻译） -->
         <div v-show="viewMode === 'translate'" class="md-translation-host">
           <MarkdownTranslation
             ref="translationRef"
             :content="content"
+            :active="viewMode === 'translate'"
             @scroll="onTranslationScroll"
           />
         </div>

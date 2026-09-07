@@ -7,6 +7,8 @@ import { TranslationEngine } from '@/utils/translator'
 const props = defineProps<{
   /** markdown 原文 */
   content: string
+  /** 是否处于「翻译」页签：仅当为 true 且文档就绪时才提交翻译，避免进入页面就自动翻译 */
+  active?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -51,13 +53,12 @@ function retry() {
 }
 
 /**
- * 文档加载 / 变化后自动整篇翻译：
- * 组件在翻译页用 v-show 常驻挂载，页面读取 md 后 content 就绪即触发，
- * 无需等用户切到「翻译」页，也无需手动点按钮。
+ * 按需翻译：仅当用户切到「翻译」页（active=true）且文档就绪时才提交 Dify 翻译；
+ * 页面进入（默认预览页）不再自动翻译。同一文档已译/译中不重复提交。
  */
 watch(
-  () => props.content,
-  (val) => {
+  [() => props.content, () => props.active],
+  ([val, active]) => {
     if (!val || !val.trim()) {
       // 文档尚未就绪：中止可能存在的请求并复位
       engine.destroy()
@@ -67,6 +68,8 @@ watch(
       status.value = 'idle'
       return
     }
+    if (!active) return
+    if (currentSource === val && (status.value === 'translating' || status.value === 'done')) return
     runTranslate(val)
   },
   { immediate: true },
@@ -102,7 +105,7 @@ defineExpose({ setScrollRatio, getRatio, status })
 <template>
   <div ref="hostRef" class="md-translation" @scroll.passive="onScroll">
     <div class="status-bar" :class="{ 'status-bar--warn': status === 'error' }">
-      <template v-if="status === 'idle'">等待文档加载…</template>
+      <template v-if="status === 'idle'">{{ props.content && props.content.trim() ? '尚未开始翻译' : '等待文档加载…' }}</template>
       <template v-else-if="status === 'translating'">
         <el-icon class="is-loading bar-icon"><Loading /></el-icon>
         正在翻译，请稍候…
@@ -139,9 +142,9 @@ defineExpose({ setScrollRatio, getRatio, status })
       <el-button size="small" type="primary" @click="retry">重试</el-button>
     </div>
 
-    <!-- 等待文档加载 -->
+    <!-- 等待文档加载 / 未切到翻译页 -->
     <div v-else class="placeholder">
-      <p class="placeholder-sub">等待文档加载…</p>
+      <p class="placeholder-sub">{{ props.content && props.content.trim() ? '切换到「翻译」页签后自动开始整篇翻译' : '等待文档加载…' }}</p>
     </div>
   </div>
 </template>
