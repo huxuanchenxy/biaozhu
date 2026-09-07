@@ -319,15 +319,8 @@ const transState = ref<'loading' | 'done' | 'error'>('loading')
 const transResult = ref('')
 const transError = ref('')
 
-/** 预览里划选到文本：记录选文并在选区上方浮现翻译按钮 */
-function onPreviewSelect(text: string) {
-  selText.value = text
-  const sel = window.getSelection()
-  const rect = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null
-  const x = rect ? Math.min(Math.max(rect.left + rect.width / 2 - 28, 8), window.innerWidth - 72) : 8
-  const y = rect ? Math.max(rect.top - 36, 8) : 8
-  selBtn.value = { show: true, x, y }
-}
+/** 左侧文档面板（预览 / 原文），只有它内部的选区才触发翻译按钮 */
+const leftPaneRef = ref<HTMLElement | null>(null)
 
 /** 隐藏浮动按钮（滚动 / 选区清空 / 开始翻译时） */
 function hideSelBtn() {
@@ -362,9 +355,29 @@ async function copyTranslation() {
   }
 }
 
-/** 选区被清空时收起浮动按钮（点按钮时选区仍在，不会误收） */
+/**
+ * 全局 mouseup：在左侧文档面板里用左键划选到文字，就在选区上方浮现「翻译」按钮；
+ * 选区为空或不在文档面板内则收起。纯左键划选触发，不涉及右键（避免默认右键菜单）。
+ */
 function onDocMouseUp() {
-  if (!(window.getSelection()?.toString().trim() ?? '')) hideSelBtn()
+  const sel = window.getSelection()
+  const text = sel?.toString().trim() ?? ''
+  if (!text || !sel || sel.rangeCount === 0) {
+    hideSelBtn()
+    return
+  }
+  const range = sel.getRangeAt(0)
+  const startEl =
+    range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+  if (!leftPaneRef.value || !startEl || !leftPaneRef.value.contains(startEl)) {
+    hideSelBtn()
+    return
+  }
+  selText.value = text
+  const rect = range.getBoundingClientRect()
+  const x = Math.min(Math.max(rect.left + rect.width / 2 - 28, 8), window.innerWidth - 72)
+  const y = Math.max(rect.top - 36, 8)
+  selBtn.value = { show: true, x, y }
 }
 
 onMounted(() => document.addEventListener('mouseup', onDocMouseUp))
@@ -377,7 +390,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="md-page">
     <!-- 左：2/3 -->
-    <section class="pane pane-left">
+    <section class="pane pane-left" ref="leftPaneRef">
       <header class="pane-head">
         <span class="pane-title">文档</span>
         <span v-if="loading" class="hint">加载中…</span>
@@ -408,7 +421,6 @@ onBeforeUnmount(() => {
           v-loading="loading"
           :content="content"
           @scroll="onPreviewScroll"
-          @select="onPreviewSelect"
         />
 
         <!-- 原文只读查看：用 v-show 保住预览区 DOM，切回来时高亮和滚动位置都还在 -->
@@ -508,6 +520,7 @@ onBeforeUnmount(() => {
         v-show="selBtn.show"
         class="sel-translate-btn"
         :style="{ left: selBtn.x + 'px', top: selBtn.y + 'px' }"
+        @mousedown.prevent
         @click="translateSelection"
       >
         翻译
