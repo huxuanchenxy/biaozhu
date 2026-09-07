@@ -12,8 +12,14 @@ interface ImportMetaEnv {
   readonly VITE_ROUTER_MODE: string
   /** 待标注文档地址（本地文件或后端接口） */
   readonly VITE_APP_DOC_URL: string
-  /** 是否默认自动加载本地翻译模型：true 自动预热 / false 进入翻译页手动加载（省内存） */
-  readonly VITE_APP_TRANSLATION_AUTOLOAD: string
+  /** Dify 翻译 workflow 的 API Key */
+  readonly VITE_DIFY_API_KEY: string
+  /** Dify 服务地址（前端直接调用，不走代理） */
+  readonly VITE_DIFY_API_BASE: string
+  /** 调用 Dify 时携带的用户标识 */
+  readonly VITE_DIFY_USER: string
+  /** Dify workflow 开始节点的输入变量名（md 原文放入 inputs[该 key]） */
+  readonly VITE_DIFY_INPUT_KEY: string
   /** 开发代理目标地址 */
   readonly VITE_PROXY_TARGET: string
   /** 开发服务器端口 */

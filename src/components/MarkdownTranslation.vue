@@ -1,179 +1,83 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import {
-  TranslationEngine,
-  detectLanguage,
-  SOURCE_LANG_OPTIONS,
-  TARGET_NLLB,
-} from '@/utils/translator'
+import { onBeforeUnmount, ref, watch } from 'vue'
+import { MdPreview } from 'md-editor-v3'
+import 'md-editor-v3/lib/preview.css'
+import { TranslationEngine } from '@/utils/translator'
 
-const props = withDefaults(
-  defineProps<{
-    /** markdown 原文 */
-    content: string
-    /** 目标语言，固定简体中文 */
-    target?: string
-    /** 是否默认自动加载模型；false 时需手动点按钮触发（省内存） */
-    autoload?: boolean
-  }>(),
-  { target: TARGET_NLLB, autoload: true },
-)
-
-type ChunkState = 'pending' | 'translating' | 'done'
-interface Chunk {
-  id: number
-  original: string
-  translated: string | null
-  state: ChunkState
-}
-
-const hostRef = ref<HTMLElement | null>(null)
-const chunks = ref<Chunk[]>([])
-const status = ref<'idle' | 'manual' | 'detecting' | 'loading-model' | 'translating' | 'done' | 'unsupported' | 'no-model'>(
-  'idle',
-)
-const modelPct = ref(0)
-const progress = ref({ done: 0, total: 0 })
-const reason = ref('')
-const info = ref('')
-
-/** 源语言：'auto' 走自动检测，否则为 NLLB FLORES 码 */
-const sourceMode = ref<string>('auto')
-const detectedSource = ref<string>('')
-const resolvedSource = computed(() => (sourceMode.value === 'auto' ? detectedSource.value || 'fra_Latn' : sourceMode.value))
-
-let cancelledRef = false
-let engineInstance: TranslationEngine | null = null
-
-/** 模型加载是否已被触发：autoload 时初始即触发；否则等用户点「加载并翻译」 */
-const activated = ref(props.autoload)
+const props = defineProps<{
+  /** markdown 原文 */
+  content: string
+}>()
 
 const emit = defineEmits<{
+  /** 滚动位置变化，参数是 0~1 的比例（与左侧原文预览双向同步） */
   scroll: [ratio: number]
 }>()
 
-function splitParagraphs(md: string): Chunk[] {
-  return md
-    .split(/\n\s*\n/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((original, id) => ({ id, original, translated: null, state: 'pending' as ChunkState }))
-}
+const hostRef = ref<HTMLElement | null>(null)
+const engine = new TranslationEngine()
 
-function getEngine(): TranslationEngine {
-  if (!engineInstance) {
-    const e = new TranslationEngine()
-    e.onProgress = (p) => {
-      if (p.phase === 'model' && p.total) modelPct.value = Math.round(((p.loaded ?? 0) / p.total) * 100)
-    }
-    e.onInfo = (m) => (info.value = m)
-    e.onError = (m) => {
-      // 模型文件缺失是典型错误：提示运行 fetch:model
-      if (/model|not found|ENOENT|404|failed to load/i.test(m)) {
-        status.value = 'no-model'
-        reason.value = '未在 public/models 找到翻译模型，请先运行 `npm run fetch:model`（需能访问 HuggingFace 的网络，本机执行一次）'
-      } else {
-        status.value = 'unsupported'
-        reason.value = m
-      }
-      console.warn('[translator] 错误：', m)
-    }
-    engineInstance = e
-  }
-  return engineInstance
-}
+/** 翻译状态：idle 等待文档 / translating 翻译中 / done 完成 / error 失败 */
+const status = ref<'idle' | 'translating' | 'done' | 'error'>('idle')
+/** 整篇译文（markdown） */
+const translated = ref('')
+const errorMsg = ref('')
+/** 当前正在翻译的原文，用于丢弃过期结果（文档切换后旧请求返回不覆盖新结果） */
+let currentSource = ''
 
-async function prepare() {
-  cancelledRef = false
-  status.value = 'detecting'
-
-  if (sourceMode.value === 'auto') {
-    detectedSource.value = (await detectLanguage(props.content)) ?? ''
-  }
-
-  const engine = getEngine()
-  status.value = 'loading-model'
-  try {
-    await engine.ready()
-  } catch {
-    // onError 已处理状态；这里仅中止流程
-    return
-  }
-  if (cancelledRef) return
-  await runTranslate()
-}
-
-/** 有内容时：已激活则加载并翻译，否则停在「待手动加载」，避免默认吃掉内存 */
-function maybePrepare() {
-  if (!chunks.value.length) return
-  if (activated.value) prepare()
-  else status.value = 'manual'
-}
-
-/** 用户点击「加载并翻译」：首次激活模型加载 */
-function startManual() {
-  activated.value = true
-  prepare()
-}
-
-async function runTranslate() {
-  const engine = getEngine()
+async function runTranslate(text: string) {
+  currentSource = text
   status.value = 'translating'
-  progress.value = { done: 0, total: chunks.value.length }
-
-  for (let i = 0; i < chunks.value.length; i++) {
-    if (cancelledRef) return
-    const c = chunks.value[i]
-    c.state = 'translating'
-    try {
-      c.translated = await engine.translate(c.original, resolvedSource.value, props.target)
-      c.state = 'done'
-    } catch (e: any) {
-      c.state = 'pending'
-      status.value = 'unsupported'
-      reason.value = e?.message ?? '翻译失败'
-      console.warn('[translator] 单段翻译失败：', e?.message)
-      return
-    }
-    progress.value.done = i + 1
+  errorMsg.value = ''
+  try {
+    const result = await engine.translate(text)
+    // 文档已变化，丢弃过期结果
+    if (currentSource !== text) return
+    translated.value = result
+    status.value = 'done'
+  } catch (e: any) {
+    // 主动取消（文档切换 / 组件卸载）不当作错误
+    if (e?.name === 'AbortError' || currentSource !== text) return
+    status.value = 'error'
+    errorMsg.value = e?.message ?? '翻译失败'
+    console.warn('[translation] Dify 翻译失败：', e?.message)
   }
-  status.value = 'done'
 }
 
-/** 文档变化 → 重置并重翻 */
+/** 翻译失败后重试 */
+function retry() {
+  const text = props.content
+  if (text && text.trim()) runTranslate(text)
+}
+
+/**
+ * 文档加载 / 变化后自动整篇翻译：
+ * 组件在翻译页用 v-show 常驻挂载，页面读取 md 后 content 就绪即触发，
+ * 无需等用户切到「翻译」页，也无需手动点按钮。
+ */
 watch(
   () => props.content,
   (val) => {
-    cancelledRef = true
-    chunks.value = splitParagraphs(val)
-    progress.value = { done: 0, total: chunks.value.length }
-    modelPct.value = 0
-    detectedSource.value = ''
-    status.value = 'idle'
-    maybePrepare()
+    if (!val || !val.trim()) {
+      // 文档尚未就绪：中止可能存在的请求并复位
+      engine.destroy()
+      currentSource = ''
+      translated.value = ''
+      errorMsg.value = ''
+      status.value = 'idle'
+      return
+    }
+    runTranslate(val)
   },
   { immediate: true },
 )
 
-/** 手动切换源语言：无需重载模型（NLLB 多语言），直接重翻 */
-function onSourceModeChange() {
-  cancelledRef = true
-  detectedSource.value = ''
-  chunks.value.forEach((c) => {
-    c.translated = null
-    c.state = 'pending'
-  })
-  progress.value = { done: 0, total: chunks.value.length }
-  maybePrepare()
-}
-
 onBeforeUnmount(() => {
-  cancelledRef = true
-  engineInstance?.destroy()
-  engineInstance = null
+  currentSource = ''
+  engine.destroy()
 })
 
-/** 外部按比例滚动本容器（双向同步用） */
+/** ---------- 滚动同步（与左侧原文预览双向） ---------- */
 function setScrollRatio(ratio: number) {
   const el = hostRef.value
   if (!el) return
@@ -192,70 +96,53 @@ function onScroll() {
   emit('scroll', getRatio())
 }
 
-function langLabel(code: string) {
-  return SOURCE_LANG_OPTIONS.find((o) => o.value === code)?.label ?? code
-}
-
 defineExpose({ setScrollRatio, getRatio, status })
 </script>
 
 <template>
   <div ref="hostRef" class="md-translation" @scroll.passive="onScroll">
-    <div
-      class="status-bar"
-      :class="{ 'status-bar--warn': status === 'unsupported' || status === 'no-model' }"
-    >
-      <template v-if="status === 'idle'">待启动…</template>
-      <template v-else-if="status === 'manual'">
-        翻译模型未加载（约 600MB，加载后会占用较多内存）
-        <el-button size="small" type="primary" class="load-btn" @click="startManual">
-          加载并翻译
-        </el-button>
-      </template>
-      <template v-else-if="status === 'detecting'">
-        正在识别源语言…
-        <span v-if="detectedSource" class="lang-tag">检测到：{{ langLabel(detectedSource) }}</span>
-      </template>
-      <template v-else-if="status === 'loading-model'">
-        加载翻译模型 {{ modelPct }}%（来自本服务器，首次一次性，之后浏览器缓存）
-      </template>
+    <div class="status-bar" :class="{ 'status-bar--warn': status === 'error' }">
+      <template v-if="status === 'idle'">等待文档加载…</template>
       <template v-else-if="status === 'translating'">
-        翻译中 {{ progress.done }} / {{ progress.total }}
-        <span class="lang-tag">{{ langLabel(resolvedSource) }} → 中文</span>
-        <span v-if="info" class="lang-tag">{{ info }}</span>
+        <el-icon class="is-loading bar-icon"><Loading /></el-icon>
+        正在翻译，请稍候…
       </template>
-      <template v-else-if="status === 'done'">
-        翻译完成 · 共 {{ chunks.length }} 段
-        <span class="lang-tag">{{ langLabel(resolvedSource) }} → 中文</span>
-        <span v-if="info" class="lang-tag">{{ info }}</span>
+      <template v-else-if="status === 'done'">翻译完成</template>
+      <template v-else-if="status === 'error'">
+        {{ errorMsg || '翻译失败' }}
+        <el-button size="small" class="retry-btn" @click="retry">重试</el-button>
       </template>
-      <template v-else-if="status === 'no-model'">{{ reason }}</template>
-      <template v-else-if="status === 'unsupported'">
-        {{ reason || '翻译失败' }}
-      </template>
-
-      <el-select
-        v-if="status !== 'unsupported' && status !== 'no-model'"
-        v-model="sourceMode"
-        size="small"
-        class="lang-select"
-        @change="onSourceModeChange"
-      >
-        <el-option v-for="o in SOURCE_LANG_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
-      </el-select>
     </div>
 
-    <div v-if="chunks.length" class="chunk-list">
-      <div v-for="c in chunks" :key="c.id" :class="['chunk', `chunk--${c.state}`]">
-        <div class="chunk-original">{{ c.original }}</div>
-        <div class="chunk-translated">
-          <template v-if="c.state === 'done'">{{ c.translated }}</template>
-          <span v-else-if="c.state === 'translating'" class="loading">翻译中…</span>
-          <span v-else class="pending">…</span>
-        </div>
-      </div>
+    <!-- 翻译中：等待提示（用户此时切到「翻译」页会看到） -->
+    <div v-if="status === 'translating'" class="placeholder">
+      <el-icon class="is-loading placeholder-icon"><Loading /></el-icon>
+      <p class="placeholder-title">正在翻译，请稍候…</p>
+      <p class="placeholder-sub">整篇文档已提交至 Dify 翻译，完成后会自动展示</p>
     </div>
-    <div v-else class="empty">暂无内容</div>
+
+    <!-- 完成：渲染整篇译文 markdown -->
+    <MdPreview
+      v-else-if="status === 'done'"
+      :model-value="translated"
+      preview-theme="github"
+      theme="light"
+      language="zh-CN"
+      :no-katex="true"
+      :no-mermaid="true"
+      :no-highlight="true"
+    />
+
+    <!-- 失败：错误提示 + 重试 -->
+    <div v-else-if="status === 'error'" class="placeholder">
+      <p class="placeholder-error">{{ errorMsg || '翻译失败' }}</p>
+      <el-button size="small" type="primary" @click="retry">重试</el-button>
+    </div>
+
+    <!-- 等待文档加载 -->
+    <div v-else class="placeholder">
+      <p class="placeholder-sub">等待文档加载…</p>
+    </div>
   </div>
 </template>
 
@@ -265,13 +152,14 @@ defineExpose({ setScrollRatio, getRatio, status })
   min-width: 0;
   overflow: auto;
   background: #fff;
-  padding: 12px 20px 20px;
 }
 
 .status-bar {
   position: sticky;
   top: 0;
-  margin: -12px -20px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 8px 20px;
   font-size: 12px;
   color: #606266;
@@ -286,84 +174,50 @@ defineExpose({ setScrollRatio, getRatio, status })
   border-bottom-color: #faecd8;
 }
 
-.status-bar :deep(.el-select) {
-  margin-left: 10px;
-  width: 110px;
-  vertical-align: middle;
-}
-
-.lang-tag {
-  margin-left: 8px;
-  padding: 1px 6px;
-  font-size: 11px;
-  color: #909399;
-  background: #f4f4f5;
-  border-radius: 3px;
-}
-
-.lang-select {
-  margin-left: 10px;
-  width: 110px;
-  vertical-align: middle;
-}
-
-.load-btn {
-  margin-left: 10px;
-  vertical-align: middle;
-}
-
-.empty {
-  padding: 20px;
+.bar-icon {
   font-size: 13px;
-  color: #a8abb2;
+}
+
+.retry-btn {
+  margin-left: 8px;
+}
+
+/* md-editor-v3 自带内边距，这里只铺满容器 */
+.md-translation :deep(.md-editor-preview-wrapper) {
+  padding: 16px 20px;
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 60px 20px;
   text-align: center;
 }
 
-.chunk-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.chunk {
-  padding: 8px 12px;
-  background: #fafbfc;
-  border-left: 2px solid #dcdfe6;
-  border-radius: 2px;
-  transition: background-color 0.15s;
-}
-
-.chunk--done {
-  background: #fff;
-  border-left-color: #67c23a;
-}
-
-.chunk--translating {
-  background: #ecf5ff;
-  border-left-color: #409eff;
-}
-
-.chunk-original {
-  margin-bottom: 4px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #909399;
-  word-break: break-word;
-}
-
-.chunk-translated {
-  font-size: 13px;
-  line-height: 1.7;
-  color: #303133;
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-
-.loading {
+.placeholder-icon {
+  font-size: 28px;
   color: #409eff;
 }
 
-.pending {
-  color: #c0c4cc;
+.placeholder-title {
+  margin: 0;
+  font-size: 14px;
+  color: #606266;
+}
+
+.placeholder-sub {
+  margin: 0;
+  font-size: 12px;
+  color: #a8abb2;
+}
+
+.placeholder-error {
+  margin: 0;
+  font-size: 13px;
+  color: #f56c6c;
+  word-break: break-word;
 }
 </style>

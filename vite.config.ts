@@ -16,13 +16,6 @@ export default defineConfig(({ mode }) => {
       },
     },
 
-    // transformers.js 体积大、文件多，预打包会生成数百文件的临时目录，
-    // 本沙箱的 safe-delete 守卫会拦截其清理导致 dev 崩溃；排除后由浏览器按原生 ESM 加载
-    // （生产构建走 Rollup 完整打包，不受影响）。
-    optimizeDeps: {
-      exclude: ['@huggingface/transformers', 'onnxruntime-web'],
-    },
-
     server: {
       host: '0.0.0.0',
       port: Number(env.VITE_PORT) || 3000,

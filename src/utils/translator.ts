@@ -1,189 +1,129 @@
 /**
- * 本地翻译引擎（基于 @huggingface/transformers + NLLB-200，完全离线、零第三方 API）。
+ * Dify Workflow 翻译引擎。
  *
- * 与上一版的「浏览器内置 Translator API」不同：
- *   - 不需要用户手势触发下载（Chrome 的硬限制已不存在）
- *   - 模型自托管在 public/models，随页面作为静态资源加载（进度条透明，无『下载包』动作）
- *   - 覆盖 200 种语言，任意现代浏览器可用
- *   - 推理在 Web Worker 后台进行，1M 文档也不卡 UI
+ * 取代原来的本地 NLLB-200 模型方案（@huggingface/transformers + Web Worker）：
+ *   - 不再在浏览器下载/推理 600MB 模型，改为调用内网 Dify 上已搭好的翻译 workflow
+ *   - 整篇 markdown 一次性提交（inputs[input] = 原文），blocking 模式等待 workflow 跑完
+ *   - 从响应 data.outputs.text 取整篇译文
  *
- * 真实代价：模型约 600MB（首次加载一次性，之后浏览器缓存）；WASM 推理比浏览器原生 API 慢，
- * 故优先 WebGPU，失败降级 WASM。
+ * 前端直接调用 Dify 服务（VITE_DIFY_API_BASE，默认 http://10.89.33.93），不走代理；
+ * 需 Dify 侧允许跨域（CORS）。
  */
 
-/** 浏览器内置语言检测（Chrome/Edge 有，Firefox/Safari 没有 → 仅做 best-effort） */
-interface LanguageDetectionResult {
-  language: string
-  confidence: number
-}
-interface BuiltinLanguageDetector {
-  detect(text: string): Promise<LanguageDetectionResult[]>
-}
-interface BuiltinLanguageDetectorStatic {
-  availability(): Promise<string>
-  create(): Promise<BuiltinLanguageDetector>
+/** Dify workflow blocking 模式返回结构（只声明用到的字段） */
+export interface DifyWorkflowOutputs {
+  /** 翻译结果文本 */
+  text?: string
+  [key: string]: unknown
 }
 
-/** BCP-47（LanguageDetector 返回，如 'fr'）→ NLLB-200 的 FLORES 码（如 'fra_Latn'） */
-const BCP47_TO_NLLB: Record<string, string> = {
-  fr: 'fra_Latn',
-  en: 'eng_Latn',
-  de: 'deu_Latn',
-  ja: 'jpn_Jpan',
-  ko: 'kor_Hang',
-  ru: 'rus_Cyrl',
-  es: 'spa_Latn',
-  it: 'ita_Latn',
-  pt: 'por_Latn',
-  zh: 'zho_Hans',
-  'zh-CN': 'zho_Hans',
-  'zh-TW': 'zho_Hant',
+export interface DifyWorkflowData {
+  id: string
+  workflow_id: string
+  /** succeeded / failed / running 等 */
+  status: string
+  outputs: DifyWorkflowOutputs | null
+  error: string | null
+  elapsed_time: number
+  total_tokens: number
+  total_steps: number
+  created_at: number
+  finished_at: number
 }
 
-/** 下拉框候选项（label 给用户看，value 是 NLLB 码） */
-export const SOURCE_LANG_OPTIONS = [
-  { value: 'auto', label: '自动检测' },
-  { value: 'fra_Latn', label: '法语' },
-  { value: 'eng_Latn', label: '英语' },
-  { value: 'deu_Latn', label: '德语' },
-  { value: 'jpn_Jpan', label: '日语' },
-  { value: 'kor_Hang', label: '韩语' },
-  { value: 'rus_Cyrl', label: '俄语' },
-  { value: 'spa_Latn', label: '西班牙语' },
-]
-
-/** 中文目标码（简体） */
-export const TARGET_NLLB = 'zho_Hans'
-
-export function bcp47ToNllb(code: string): string | null {
-  return BCP47_TO_NLLB[code] ?? null
+export interface DifyWorkflowResponse {
+  workflow_run_id: string
+  task_id: string
+  data: DifyWorkflowData
 }
 
-/** 自动识别源语言（取文档前 2000 字采样）。不支持/出错返回 null，调用方回退手动选择 */
-export async function detectLanguage(text: string): Promise<string | null> {
-  const ns = (self as unknown as { LanguageDetector?: BuiltinLanguageDetectorStatic }).LanguageDetector
-  if (!ns) return null
-  try {
-    const availability = await ns.availability()
-    if (availability === 'unavailable') return null
-    const detector = await ns.create()
-    const results = await detector.detect(text.slice(0, 2000))
-    const top = results?.[0]?.language
-    return top ? bcp47ToNllb(top) : null
-  } catch (e) {
-    console.warn('[translator] 语言检测失败：', (e as Error)?.message)
-    return null
-  }
-}
-
-/** 翻译进度事件 */
-export interface TranslationProgress {
-  phase: 'model' | 'translate'
-  loaded?: number
-  total?: number
-  file?: string
-  status?: string
-}
-
-type WorkerMsg =
-  | { type: 'progress'; phase: 'model'; data: any }
-  | { type: 'info'; message: string }
-  | { type: 'ready' }
-  | { type: 'result'; id: number; text: string }
-  | { type: 'error'; id?: number; message: string }
+/** Dify 配置（来自 .env，均以 VITE_ 开头才会打包进前端） */
+const DIFY_API_BASE = (import.meta.env.VITE_DIFY_API_BASE || 'http://10.89.33.93').replace(/\/$/, '')
+const DIFY_API_KEY = import.meta.env.VITE_DIFY_API_KEY || ''
+const DIFY_USER = import.meta.env.VITE_DIFY_USER || 'huyz'
+const DIFY_INPUT_KEY = import.meta.env.VITE_DIFY_INPUT_KEY || 'input'
 
 /**
- * 翻译引擎：包一层 Web Worker，对外暴露「准备 → 逐段翻译」的Promise 接口。
- * 同时把模型加载进度、降级信息、错误转成回调，便于 UI 展示。
+ * 整篇翻译耗时可能较长（大文档 + LLM），单独设一个较大的超时兜底，避免请求永久挂起。
+ * 文档很大时可适当调大；设为 0 则不超时。
+ */
+const DIFY_TIMEOUT = 5 * 60 * 1000
+
+/**
+ * 翻译引擎：对外暴露「整篇翻译」的 Promise 接口，UI 层只与该接口交互。
+ * 内部用 AbortController 支持取消（文档切换 / 组件卸载时中止进行中的请求）。
  */
 export class TranslationEngine {
-  private worker: Worker | null = null
-  private seq = 0
-  private pending = new Map<number, { resolve: (v: string) => void; reject: (e: Error) => void }>()
-  private readyResolvers: Array<() => void> = []
-  private readyRejected: ((e: Error) => void) | null = null
-  private isReady = false
+  private controller: AbortController | null = null
 
-  onProgress: ((p: TranslationProgress) => void) | null = null
-  onInfo: ((msg: string) => void) | null = null
-  onError: ((msg: string) => void) | null = null
+  /**
+   * 整篇翻译：把 markdown 原文提交给 Dify workflow，blocking 等待并返回整篇译文。
+   * @param text markdown 原文
+   */
+  async translate(text: string): Promise<string> {
+    if (!DIFY_API_KEY) {
+      throw new Error('未配置 Dify API Key（请在 .env 设置 VITE_DIFY_API_KEY）')
+    }
 
-  private ensureWorker() {
-    if (this.worker) return
-    this.worker = new Worker(new URL('../workers/translation.worker.ts', import.meta.url), {
-      type: 'module',
-    })
-    this.worker.onmessage = (e: MessageEvent) => this.handle(e.data)
-    this.worker.onerror = (e) => {
-      const msg = e.message || '翻译 Worker 异常'
-      this.onError?.(msg)
-      this.readyRejected?.(new Error(msg))
+    // 取消上一个进行中的请求，避免文档切换后旧结果覆盖新结果
+    this.controller?.abort()
+    const controller = new AbortController()
+    this.controller = controller
+
+    let timedOut = false
+    const timer =
+      DIFY_TIMEOUT > 0
+        ? setTimeout(() => {
+            timedOut = true
+            controller.abort()
+          }, DIFY_TIMEOUT)
+        : null
+
+    try {
+      const res = await fetch(`${DIFY_API_BASE}/v1/workflows/run`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${DIFY_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          inputs: { [DIFY_INPUT_KEY]: text },
+          response_mode: 'blocking',
+          user: DIFY_USER,
+        }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '')
+        throw new Error(
+          `Dify 请求失败（HTTP ${res.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`,
+        )
+      }
+
+      const json = (await res.json()) as DifyWorkflowResponse
+      const data = json?.data
+      if (!data) throw new Error('Dify 返回结构异常：缺少 data 字段')
+      if (data.status !== 'succeeded') {
+        throw new Error(`Dify workflow 执行未成功：${data.error || data.status || '未知状态'}`)
+      }
+
+      const output = data.outputs?.text
+      if (output == null) throw new Error('Dify workflow 未返回 outputs.text')
+      return String(output)
+    } catch (e) {
+      // 超时兜底：转成可读错误（主动取消则由调用方按 AbortError 忽略）
+      if (timedOut) throw new Error('Dify 翻译超时（文档过大或服务繁忙），请稍后重试')
+      throw e
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (this.controller === controller) this.controller = null
     }
   }
 
-  private handle(msg: WorkerMsg) {
-    switch (msg.type) {
-      case 'progress':
-        this.onProgress?.({ phase: 'model', ...(msg.data ?? {}) })
-        break
-      case 'info':
-        this.onInfo?.(msg.message)
-        break
-      case 'ready':
-        this.isReady = true
-        this.readyResolvers.forEach((r) => r())
-        this.readyResolvers = []
-        break
-      case 'result': {
-        const p = this.pending.get(msg.id)
-        if (p) {
-          this.pending.delete(msg.id)
-          p.resolve(msg.text)
-        }
-        break
-      }
-      case 'error': {
-        const err = new Error(msg.message)
-        if (msg.id != null) {
-          const p = this.pending.get(msg.id)
-          if (p) {
-            this.pending.delete(msg.id)
-            p.reject(err)
-          }
-        } else {
-          this.onError?.(msg.message)
-          this.readyRejected?.(err)
-        }
-        break
-      }
-    }
-  }
-
-  /** 预热模型（后台加载）。返回 Promise，模型就绪后 resolve */
-  ready(): Promise<void> {
-    this.ensureWorker()
-    if (this.isReady) return Promise.resolve()
-    return new Promise<void>((resolve, reject) => {
-      this.readyResolvers.push(resolve)
-      this.readyRejected = reject
-      this.worker!.postMessage({ type: 'warmup' })
-    })
-  }
-
-  /** 翻译单段文本。srcLang/tgtLang 均为 NLLB FLORES 码 */
-  translate(text: string, srcLang: string, tgtLang: string): Promise<string> {
-    this.ensureWorker()
-    const id = ++this.seq
-    return new Promise<string>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      this.worker!.postMessage({ type: 'translate', id, text, srcLang, tgtLang })
-    })
-  }
-
+  /** 取消进行中的翻译请求（组件卸载 / 文档切换时调用） */
   destroy() {
-    this.worker?.terminate()
-    this.worker = null
-    this.isReady = false
-    this.pending.clear()
+    this.controller?.abort()
+    this.controller = null
   }
 }
