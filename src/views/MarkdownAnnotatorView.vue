@@ -160,7 +160,7 @@ tabs.value.forEach(loadTab)
 const currentPage = ref(1)
 const pageSize = ref(5)
 
-/** 当前页的全局 0 基起始下标：用于 Q&A_n 编号与定位编辑项 */
+/** 当前页的全局 0 基起始下标：用于卡片编号（标签名_n）与定位编辑项 */
 const pageStart = computed(() => (currentPage.value - 1) * pageSize.value)
 
 const pagedRecords = computed(() =>
@@ -460,7 +460,7 @@ onBeforeUnmount(() => {
 
         <div v-else class="qa-list">
           <article v-for="(rec, i) in pagedRecords" :key="pageStart + i" class="qa-card">
-            <header class="qa-card-head">Q&A_{{ pageStart + i + 1 }}</header>
+            <header class="qa-card-head">{{ activeTab.label }}_{{ pageStart + i + 1 }}</header>
 
             <!-- 问槽位 -->
             <div class="qa-question">
