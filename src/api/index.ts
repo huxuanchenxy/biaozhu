@@ -73,12 +73,19 @@ export async function getMinioDocJson(key: string): Promise<DocJsonRecord[]> {
 /**
  * 上传覆盖 MinIO 上的 json 对象（后端 POST /api/file/uploadOverwrite）。
  * multipart/form-data：file=当前编辑的整个 json 文件，fullObjectPath=/<bucket>/<key>。
+ * 直连后端（VITE_API_DIRECT_BASE，含 /api），不走 Vite/server.mjs 代理；传绝对 URL 时 axios 会忽略实例 baseURL。
  */
+const UPLOAD_API_BASE = (
+  import.meta.env.VITE_API_DIRECT_BASE ||
+  import.meta.env.VITE_APP_BASE_API ||
+  '/api'
+).replace(/\/$/, '')
+
 export async function uploadOverwriteJson(fullPath: string, data: DocJsonRecord[]): Promise<void> {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const fileName = fullPath.split('/').pop() || 'data.json'
   const file = new File([blob], fileName, { type: 'application/json' })
-  await http.upload<any>('/file/uploadOverwrite', file, { fullObjectPath: fullPath })
+  await http.upload<any>(`${UPLOAD_API_BASE}/file/uploadOverwrite`, file, { fullObjectPath: fullPath })
 }
 
 /**

@@ -1,26 +1,19 @@
 /**
- * MinIO 对象存储读取封装（前端侧，服务端签名架构）。
+ * 文档 / 标注 json 读取封装（前端侧）。
  *
- * 前端不再签名、也不持有任何密钥：只发「同源 GET /<bucket>/<key>」。
- * 真正的 SigV4 签名由服务端完成：
- *   - 生产：server.mjs（与静态文件同进程）签名后转发 MinIO；
- *   - 开发：Vite 把 /<bucket>/... 代理到本地 server.mjs（签名服务），再由它转发 MinIO。
- * 这样浏览器时钟偏差不会再触发 RequestTimeTooSkewed，密钥也不会进前端包。
+ * md 原文与三个标注 json 都通过后端下载接口获取（直连，不走代理）：
+ *   GET <VITE_API_DIRECT_BASE>/file/download?fullObjectPath=/<bucket>/<key>（fullObjectPath 需 URL 编码）
+ * 前端不持有任何 MinIO 密钥；桶名（VITE_MINIO_BUCKET）仅用于拼 fullObjectPath 前缀。
  *
- * 视图层只需调用 getObjectText(key) 按「桶内对象路径」拿到文本内容。
+ * 路径规则不变：视图拿到 md 的 key 后，用 deriveAnnotationKeys 推出 QA/SFT/CoT 三个 json 的 key，
+ * 再分别调 getObjectText 去后端下载。
  */
 
-/** 存储桶名称（前端唯一需要的 MinIO 配置，用于拼同源路径） */
+/** 存储桶名称：仅用于拼下载/上传接口需要的 fullObjectPath 前缀（/<bucket>/<key>） */
 const MINIO_BUCKET = import.meta.env.VITE_MINIO_BUCKET || ''
 
-/**
- * 严格编码单个路径段：encodeURIComponent 之后再补上它默认不编码的 !'()*。
- * MinIO 计算 SigV4 canonical URI 时会对路径规范化（字面 '(' 会变成 %28），
- * 前端直接发出严格编码的路径，可保证「线上路径 == 签名 canonical」，避免签名不匹配。
- */
-function encodePathSegment(seg: string): string {
-  return encodeURIComponent(seg).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
-}
+/** 后端文件接口直连基址（含 /api），md 与标注 json 都从 /file/download 取；不走代理 */
+const API_DIRECT_BASE = (import.meta.env.VITE_API_DIRECT_BASE || '/api').replace(/\/$/, '')
 
 /**
  * 规范化对象 key：
@@ -83,9 +76,8 @@ export function fullObjectPath(key: string): string {
 }
 
 /**
- * 按对象 key 读取 MinIO 中的文本内容（如 md 原文）。
- * 走同源请求，由服务端签名服务转发 MinIO。
- * @param key 桶内对象路径（不含桶名），例如 'a/b/c.md'
+ * 按对象 key 读取文本内容（md 原文 / 标注 json），走后端下载接口直连。
+ * @param key 桶内对象路径（不含桶名），例如 'a/b/c.md'；也兼容带桶名前缀的完整路径
  * @returns   对象的 utf-8 文本
  */
 export async function getObjectText(key: string): Promise<string> {
@@ -94,19 +86,19 @@ export async function getObjectText(key: string): Promise<string> {
   }
   const objectKey = normalizeObjectKey(key)
   if (!objectKey) throw new Error('对象路径为空')
-  // 空目录段（连续 '//'）是数据问题：MinIO 的 S3 路由会归一化重复斜杠，
-  // 导致「签名用的路径」与「实际查找的路径」不一致（SignatureDoesNotMatch / NoSuchKey）。
-  // 这里提前拦截并给出可操作的提示，避免暴露难懂的签名错误。
+  // 空目录段（连续 '//'）通常是数据问题，提前拦截并给出可操作提示
   if (objectKey.includes('//')) {
     throw new Error(
-      `对象路径含空目录段（连续 "//"）：${objectKey}。MinIO 无法通过 S3 接口直接读取该对象，请先在 MinIO 中修正对象 key（去掉空目录）后重试。`,
+      `对象路径含空目录段（连续 "//"）：${objectKey}。请先修正对象 key（去掉空目录）后重试。`,
     )
   }
 
-  const url = `/${MINIO_BUCKET}/` + objectKey.split('/').map(encodePathSegment).join('/')
+  // fullObjectPath = /<bucket>/<key>，整体 URL 编码后作为 query 传给后端下载接口
+  const full = fullObjectPath(objectKey)
+  const url = `${API_DIRECT_BASE}/file/download?fullObjectPath=${encodeURIComponent(full)}`
   const res = await fetch(url)
   if (!res.ok) {
-    throw new Error(`读取 MinIO 对象失败 HTTP ${res.status}：${objectKey}`)
+    throw new Error(`读取文件失败 HTTP ${res.status}：${objectKey}`)
   }
   return await res.text()
 }

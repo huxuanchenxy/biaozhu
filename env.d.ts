@@ -26,6 +26,8 @@ interface ImportMetaEnv {
   readonly VITE_MINIO_SIGNER: string
   /** 开发代理目标地址 */
   readonly VITE_PROXY_TARGET: string
+  /** 后端文件接口直连基址（含 /api，不走 Vite/server.mjs 代理）：下载/上传都用它，如 http://host:8080/api */
+  readonly VITE_API_DIRECT_BASE: string
   /** 开发服务器端口 */
   readonly VITE_PORT: string
   /** 打包输出目录 */
