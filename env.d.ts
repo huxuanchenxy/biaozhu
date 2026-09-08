@@ -28,6 +28,12 @@ interface ImportMetaEnv {
   readonly VITE_PROXY_TARGET: string
   /** 后端文件接口直连基址（含 /api，不走 Vite/server.mjs 代理）：下载/上传都用它，如 http://host:8080/api */
   readonly VITE_API_DIRECT_BASE: string
+  /** 标注 json 相对路径模板（相对 md 上级目录，{name}=md 主名）：QA */
+  readonly VITE_ANNOTATION_QA_PATTERN: string
+  /** 标注 json 相对路径模板：SFT（对应 Alpaca/SFT 标签页） */
+  readonly VITE_ANNOTATION_SFT_PATTERN: string
+  /** 标注 json 相对路径模板：CoT */
+  readonly VITE_ANNOTATION_COT_PATTERN: string
   /** 开发服务器端口 */
   readonly VITE_PORT: string
   /** 打包输出目录 */

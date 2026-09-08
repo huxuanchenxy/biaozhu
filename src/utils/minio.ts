@@ -16,6 +16,20 @@ const MINIO_BUCKET = import.meta.env.VITE_MINIO_BUCKET || ''
 const API_DIRECT_BASE = (import.meta.env.VITE_API_DIRECT_BASE || '/api').replace(/\/$/, '')
 
 /**
+ * 三个标注 json 的相对路径模板（相对 md 的上级目录 <parent>，与 QA/SFT/CoT 文件夹同级）。
+ * {name} 会替换成 md 主名（去掉 .md 扩展名）。后缀（如 _sft.json）或文件夹名变了，
+ * 只改 .env 里对应配置即可，无需动代码。
+ */
+const QA_PATTERN = import.meta.env.VITE_ANNOTATION_QA_PATTERN || 'QA/{name}_qa.json'
+const SFT_PATTERN = import.meta.env.VITE_ANNOTATION_SFT_PATTERN || 'SFT/{name}_sft.json'
+const COT_PATTERN = import.meta.env.VITE_ANNOTATION_COT_PATTERN || 'CoT/{name}_cot.json'
+
+/** 把模板里的 {name} 替换成 md 主名，并拼上 <parent>/ 前缀 */
+function applyPattern(pattern: string, prefix: string, name: string): string {
+  return `${prefix}${pattern.replace(/\{name\}/g, name)}`
+}
+
+/**
  * 规范化对象 key：
  *   - 去掉开头的 '/'（S3 key 不以 / 开头）
  *   - 若 URL 里带上了桶名前缀（如 /drivdernet_abc/xxx），自动剥掉桶名
@@ -34,13 +48,10 @@ export function normalizeObjectKey(raw: string): string {
 /**
  * 由 md 的 object key 推导三个标注 json 的 object key。
  *
- * 目录规则（QA / SFT / CoT 三个文件夹名固定，与 MD 同级）：
- *   md      : <parent>/MD/<name>.md
- *   qa      : <parent>/QA/<name>_qa.json
- *   alpaca  : <parent>/SFT/<name>_sft.json
- *   cot     : <parent>/CoT/<name>_cot.json
- * 其中 <parent> 是 MD 文件夹的上一级，<name> 是 md 文件名（去掉 .md 扩展名）。
- * 文件夹名固定，里面的文件名随 <name> 变，故按同一 <name> 拼接后缀即可。
+ * md 位于 <parent>/MD/<name>.md；三个 json 的相对路径由 .env 里的模板决定
+ * （见 QA_PATTERN/SFT_PATTERN/COT_PATTERN），模板相对 <parent>，{name} 替换为 md 主名。
+ * 默认：QA/{name}_qa.json、SFT/{name}_sft.json、CoT/{name}_cot.json。
+ * 后缀（如 _sft.json）或文件夹名变动时，只改 .env 配置即可。
  */
 export function deriveAnnotationKeys(mdKey: string): {
   qa: string
@@ -56,9 +67,9 @@ export function deriveAnnotationKeys(mdKey: string): {
   const name = fileName.replace(/\.md$/i, '') // <name>
   const prefix = parent ? `${parent}/` : ''
   return {
-    qa: `${prefix}QA/${name}_qa.json`,
-    alpaca: `${prefix}SFT/${name}_sft.json`,
-    cot: `${prefix}CoT/${name}_cot.json`,
+    qa: applyPattern(QA_PATTERN, prefix, name),
+    alpaca: applyPattern(SFT_PATTERN, prefix, name),
+    cot: applyPattern(COT_PATTERN, prefix, name),
   }
 }
 
