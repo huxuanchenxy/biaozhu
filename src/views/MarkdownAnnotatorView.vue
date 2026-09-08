@@ -342,6 +342,9 @@ async function translateSelection() {
   const text = selText.value
   if (!text) return
   hideSelBtn()
+  // 清除 DOM 选区：否则弹窗内点击（如「复制译文」）触发的全局 mouseup
+  // 会因选区仍在而重新弹出「翻译」按钮。selText 已存下，不影响翻译。
+  window.getSelection()?.removeAllRanges()
   transDialog.value = true
   transState.value = 'loading'
   transResult.value = ''
@@ -357,11 +360,29 @@ async function translateSelection() {
 }
 
 async function copyTranslation() {
+  const text = transResult.value
+  if (!text) return
   try {
-    await navigator.clipboard.writeText(transResult.value)
+    // 优先用异步 Clipboard API（仅 https / localhost 等安全上下文可用）；
+    // 内网 http 部署时 navigator.clipboard 为 undefined，回退到 execCommand('copy')。
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.top = '-9999px'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      if (!ok) throw new Error('execCommand copy failed')
+    }
     ElMessage.success('译文已复制')
   } catch {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error('复制失败，请手动选中译文复制')
   }
 }
 
@@ -370,6 +391,8 @@ async function copyTranslation() {
  * 选区为空或不在文档面板内则收起。纯左键划选触发，不涉及右键（避免默认右键菜单）。
  */
 function onDocMouseUp() {
+  // 译文弹窗打开时不处理（弹窗内的点击不应触发浮动按钮）
+  if (transDialog.value) return
   const sel = window.getSelection()
   const text = sel?.toString().trim() ?? ''
   if (!text || !sel || sel.rangeCount === 0) {
