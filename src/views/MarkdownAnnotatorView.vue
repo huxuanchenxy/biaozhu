@@ -55,19 +55,29 @@ const loadError = ref('')
 async function loadDoc() {
   loading.value = true
   loadError.value = ''
+  content.value = ''
+  let text = ''
   try {
     if (docKey.value) {
-      content.value = await getObjectText(docKey.value)
+      text = await getObjectText(docKey.value)
     } else {
       const res = await fetch(DOC_URL)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      content.value = await res.text()
+      text = await res.text()
     }
   } catch (e: any) {
     loadError.value = `文档加载失败：${e?.message ?? '未知错误'}`
-  } finally {
     loading.value = false
+    return
   }
+  // 先让「加载中」转圈真正绘制到屏幕上（双 rAF 保证完成一次 paint），
+  // 再塞入大文档触发渲染；否则大文件渲染会阻塞主线程，转圈来不及显示就白屏。
+  await nextTick()
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  content.value = text
+  // 等预览渲染完成后再收转圈，避免渲染期间白屏无反馈
+  await nextTick()
+  loading.value = false
 }
 
 loadDoc()
@@ -401,7 +411,11 @@ onBeforeUnmount(() => {
         </el-radio-group>
       </header>
 
-      <div class="pane-body doc-body">
+      <div
+        v-loading="loading"
+        element-loading-text="文档加载中…"
+        class="pane-body doc-body"
+      >
         <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" />
 
         <!-- 已注释：编辑区（当前只需要预览） -->
@@ -418,7 +432,6 @@ onBeforeUnmount(() => {
         <MarkdownPreview
           v-show="viewMode !== 'source'"
           ref="previewRef"
-          v-loading="loading"
           :content="content"
           @scroll="onPreviewScroll"
         />
