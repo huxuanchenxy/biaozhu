@@ -329,8 +329,14 @@ const transState = ref<'loading' | 'done' | 'error'>('loading')
 const transResult = ref('')
 const transError = ref('')
 
-/** 左侧文档面板（预览 / 原文），只有它内部的选区才触发翻译按钮 */
+/**
+ * 触发翻译按钮的选区容器：
+ *   - 左：文档面板（预览 / 原文）
+ *   - 右：标注面板（SFT / COT / QA 三个 json 的问答卡片）
+ * 只有落在这些面板内部的选区才会浮现「翻译」按钮。
+ */
 const leftPaneRef = ref<HTMLElement | null>(null)
+const rightPaneRef = ref<HTMLElement | null>(null)
 
 /** 隐藏浮动按钮（滚动 / 选区清空 / 开始翻译时） */
 function hideSelBtn() {
@@ -402,7 +408,12 @@ function onDocMouseUp() {
   const range = sel.getRangeAt(0)
   const startEl =
     range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-  if (!leftPaneRef.value || !startEl || !leftPaneRef.value.contains(startEl)) {
+  // 左侧文档面板或右侧标注面板内的选区都触发翻译（复用同一个 Dify 引擎与弹窗）
+  const inPane =
+    !!startEl &&
+    ((leftPaneRef.value?.contains(startEl) ?? false) ||
+      (rightPaneRef.value?.contains(startEl) ?? false))
+  if (!inPane) {
     hideSelBtn()
     return
   }
@@ -485,7 +496,7 @@ onBeforeUnmount(() => {
         />
       </el-tabs>
 
-      <div v-loading="activeTab.status === 'loading'" class="pane-body qa-body">
+      <div v-loading="activeTab.status === 'loading'" ref="rightPaneRef" class="pane-body qa-body">
         <el-alert
           v-if="activeTab.status === 'error'"
           :title="activeTab.error"
