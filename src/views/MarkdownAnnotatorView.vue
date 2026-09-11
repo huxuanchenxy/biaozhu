@@ -8,6 +8,7 @@ import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
 import { deriveAnnotationKeys, derivePdfKey, getObjectBlobUrl, getObjectText } from '@/utils/minio'
 import { TranslationEngine } from '@/utils/translator'
+import PdfViewer from '@/components/PdfViewer.vue'
 
 /**
  * 待标注文档地址。
@@ -39,10 +40,10 @@ const pdfKey = computed(() => (docKey.value ? derivePdfKey(docKey.value) : ''))
 
 /**
  * 左栏展示模式：
- *   preview 预览——显示由 md 路径推导出的原始 PDF（浏览器原生阅读器）；
- *   split   分栏——PDF 与 MD 源码并排，各自独立滚动（PDF 在 iframe 内，无法与源码同步）；
+ *   preview 预览——显示由 md 路径推导出的原始 PDF（pdf.js 自渲染）；
+ *   split   分栏——PDF 与 MD 源码并排，滚动位置按比例双向联动；
  *   source  原文——只读查看 MD 源码。
- * 翻译为「选中一段再译」（见下方选段翻译）；PDF 内划选不触发翻译，MD 源码与右侧标注可。
+ * 翻译为「选中一段再译」（见下方选段翻译）；PDF 页是 canvas 不支持划选翻译，MD 源码与右侧标注可。
  */
 type ViewMode = 'preview' | 'split' | 'source'
 const viewMode = ref<ViewMode>('preview')
@@ -92,7 +93,7 @@ async function loadDoc() {
   loading.value = false
 }
 
-/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供 <iframe> 预览 */
+/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供 PdfViewer 渲染 */
 async function loadPdf() {
   // 切换文档前先释放上一次的 blob URL，避免内存泄漏
   if (pdfUrl.value) {
@@ -284,7 +285,7 @@ async function saveEdit() {
 /* ------------------------------------------------------------------
  * 选段翻译：在 MD 源码或右侧标注卡片里划选一段 → 选区上方浮现「翻译」按钮 → 弹窗展示译文。
  * 取代原来的整篇翻译（太慢），只把选中片段提交给 Dify。
- * 注：PDF 预览在 <iframe> 内，选区不被父页捕获，故 PDF 上划选不触发翻译。
+ * 注：PDF 页由 pdf.js 渲染成 canvas，canvas 上没有可选文本，故 PDF 上划选不触发翻译。
  * ------------------------------------------------------------------ */
 const engine = new TranslationEngine()
 /** 当前划选的文本 */
@@ -305,6 +306,49 @@ const transError = ref('')
  */
 const leftPaneRef = ref<HTMLElement | null>(null)
 const rightPaneRef = ref<HTMLElement | null>(null)
+
+/* ------------------------------------------------------------------
+ * 分栏模式滚动联动：左侧 PDF（PdfViewer 内部滚动容器）与右侧 MD 源码
+ * 按「已滚动比例」双向同步。两边内容总长不同，故用比例而非像素映射。
+ * scrollSyncing 用于切断「A 滚动 → 程序设置 B → B 又触发 scroll」的回环。
+ * ------------------------------------------------------------------ */
+const pdfViewerRef = ref<InstanceType<typeof PdfViewer> | null>(null)
+const mdSourceRef = ref<HTMLElement | null>(null)
+let scrollSyncing = false
+
+/** 解除同步标记放在两帧之后：程序化滚动触发的 scroll 事件可能晚于当前任务派发 */
+function releaseSyncGuard() {
+  requestAnimationFrame(() => requestAnimationFrame(() => (scrollSyncing = false)))
+}
+
+function syncScroll(from: 'pdf' | 'md', ratio: number) {
+  if (viewMode.value !== 'split' || scrollSyncing) return
+  scrollSyncing = true
+  if (from === 'pdf') {
+    const el = mdSourceRef.value
+    if (el) {
+      const max = el.scrollHeight - el.clientHeight
+      if (max > 0) el.scrollTop = ratio * max
+    }
+  } else {
+    pdfViewerRef.value?.scrollToRatio(ratio)
+  }
+  releaseSyncGuard()
+}
+
+/** PDF 滚动：PdfViewer 上报 top/view/full，换算成 0~1 比例同步给源码栏 */
+function onPdfScroll({ top, view, full }: { top: number; view: number; full: number }) {
+  const max = full - view
+  syncScroll('pdf', max > 0 ? top / max : 0)
+}
+
+/** MD 源码滚动：换算成 0~1 比例同步给 PDF 栏 */
+function onMdScroll() {
+  const el = mdSourceRef.value
+  if (!el) return
+  const max = el.scrollHeight - el.clientHeight
+  syncScroll('md', max > 0 ? el.scrollTop / max : 0)
+}
 
 /** 隐藏浮动按钮（滚动 / 选区清空 / 开始翻译时） */
 function hideSelBtn() {
@@ -433,7 +477,7 @@ onBeforeUnmount(() => {
         />
         -->
 
-        <!-- 预览：显示由 md 路径推导出的原始 PDF（浏览器原生阅读器，用 blob URL 承载） -->
+        <!-- 预览：显示由 md 路径推导出的原始 PDF（pdf.js 自渲染，滚动容器可与原文联动） -->
         <div
           v-show="viewMode !== 'source'"
           :class="['pdf-host', { 'pdf-host--split': viewMode === 'split' }]"
@@ -445,14 +489,21 @@ onBeforeUnmount(() => {
             show-icon
             :closable="false"
           />
-          <iframe v-else-if="pdfUrl" :src="pdfUrl" class="pdf-frame" title="PDF 预览" />
+          <PdfViewer
+            v-else-if="pdfUrl"
+            ref="pdfViewerRef"
+            :src="pdfUrl"
+            @scroll="onPdfScroll"
+          />
           <div v-else class="empty">暂无 PDF</div>
         </div>
 
-        <!-- 原文只读查看 MD 源码：分栏时与 PDF 并排，两者各自独立滚动 -->
+        <!-- 原文只读查看 MD 源码：分栏时与 PDF 并排，两者按滚动比例联动 -->
         <pre
+          ref="mdSourceRef"
           v-show="viewMode === 'split' || viewMode === 'source'"
           :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
+          @scroll="onMdScroll"
         >{{ content }}</pre>
       </div>
     </section>
@@ -639,7 +690,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* PDF 预览宿主：预览模式占满，分栏时占左半；内部 iframe 撑满 */
+/* PDF 预览宿主：预览模式占满，分栏时占左半；内部 PdfViewer 撑满 */
 .pdf-host {
   flex: 1;
   min-width: 0;
@@ -652,11 +703,10 @@ onBeforeUnmount(() => {
   flex: 0 0 50%;
 }
 
-.pdf-frame {
+/* PdfViewer 根节点是普通 div（非 flex item 默认 stretch 即可），显式撑满宿主 */
+.pdf-host > :deep(.pdf-scroll) {
   flex: 1;
-  width: 100%;
   min-height: 0;
-  border: 0;
 }
 
 /* 分栏时两个容器各占一半，中间加分隔线 */
