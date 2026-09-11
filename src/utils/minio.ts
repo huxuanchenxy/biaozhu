@@ -31,6 +31,9 @@ const COT_PATTERN = import.meta.env.VITE_ANNOTATION_COT_PATTERN || 'CoT/{name}_c
  */
 const PDF_PATTERN = import.meta.env.VITE_DOC_PDF_PATTERN || '{name}.pdf'
 
+/** 译文 md 的文件名前缀：与原文同目录，仅在文件名前加此前缀（默认 cn_）。可用 .env 覆盖。 */
+const TRANSLATED_MD_PREFIX = import.meta.env.VITE_DOC_TRANSLATED_PREFIX || 'cn_'
+
 /** 把模板里的 {name} 替换成 md 主名，并拼上 <parent>/ 前缀 */
 function applyPattern(pattern: string, prefix: string, name: string): string {
   return `${prefix}${pattern.replace(/\{name\}/g, name)}`
@@ -100,6 +103,19 @@ export function derivePdfKey(mdKey: string): string {
   const name = fileName.replace(/\.md$/i, '') // <name>
   const prefix = grandparent ? `${grandparent}/` : ''
   return applyPattern(PDF_PATTERN, prefix, name)
+}
+
+/**
+ * 由 md 的 object key 推导「译文 md」的 object key：与原文位于同一目录，
+ * 仅在文件名前加前缀（默认 cn_）。例：.../MD/<name>.md -> .../MD/cn_<name>.md
+ * 前缀可用 .env 的 VITE_DOC_TRANSLATED_PREFIX 覆盖。
+ */
+export function deriveTranslatedMdKey(mdKey: string): string {
+  const key = normalizeObjectKey(mdKey).replace(/\\/g, '/')
+  const slash = key.lastIndexOf('/')
+  const dir = slash >= 0 ? key.slice(0, slash + 1) : '' // 含结尾 '/'
+  const fileName = slash >= 0 ? key.slice(slash + 1) : key
+  return `${dir}${TRANSLATED_MD_PREFIX}${fileName}`
 }
 
 /** 是否已具备访问 MinIO 的必要配置（前端只需桶名） */

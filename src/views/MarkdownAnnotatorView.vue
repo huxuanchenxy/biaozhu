@@ -6,9 +6,16 @@ import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
 import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
-import { deriveAnnotationKeys, derivePdfKey, getObjectBlobUrl, getObjectText } from '@/utils/minio'
+import {
+  deriveAnnotationKeys,
+  derivePdfKey,
+  deriveTranslatedMdKey,
+  getObjectBlobUrl,
+  getObjectText,
+} from '@/utils/minio'
 import { TranslationEngine } from '@/utils/translator'
 import PdfViewer from '@/components/PdfViewer.vue'
+import MarkdownPreview from '@/components/MarkdownPreview.vue'
 
 /**
  * 待标注文档地址。
@@ -39,11 +46,17 @@ const annotationKeys = computed(() => (docKey.value ? deriveAnnotationKeys(docKe
 const pdfKey = computed(() => (docKey.value ? derivePdfKey(docKey.value) : ''))
 
 /**
- * 左栏展示模式：
+ * 由 md 的 key 推导「译文 md」的 key（与原文同目录、文件名前加 cn_）；无 docKey 时为空串。
+ * 规则见 utils/minio 的 deriveTranslatedMdKey，前缀可用 .env 的 VITE_DOC_TRANSLATED_PREFIX 覆盖。
+ */
+const translatedKey = computed(() => (docKey.value ? deriveTranslatedMdKey(docKey.value) : ''))
+
+/**
+ * 左栏展示模式（内部值沿用 'split'，按钮文案叫「翻译」）：
  *   preview 预览——显示由 md 路径推导出的原始 PDF（pdf.js 自渲染）；
- *   split   分栏——PDF 与 MD 源码并排，滚动位置按比例双向联动；
- *   source  原文——只读查看 MD 源码。
- * 翻译为「选中一段再译」（见下方选段翻译）；PDF 页是 canvas 不支持划选翻译，MD 源码与右侧标注可。
+ *   split   翻译——左侧 PDF 不动，右侧渲染 cn_ 译文 md，两者按滚动比例双向联动；
+ *   source  原文——只读查看原始 MD 源码。
+ * 划选翻译（见下方选段翻译）：PDF 页是 canvas 不支持划选，MD 原文/译文与右侧标注可。
  */
 type ViewMode = 'preview' | 'split' | 'source'
 const viewMode = ref<ViewMode>('preview')
@@ -59,10 +72,16 @@ const content = ref('')
 const loading = ref(false)
 const loadError = ref('')
 
-/** PDF 预览：blob 对象 URL（供 <iframe> 直接渲染）、加载态、错误信息 */
+/** PDF 预览：blob 对象 URL（供 PdfViewer 渲染）、加载态、错误信息 */
 const pdfUrl = ref('')
 const pdfLoading = ref(false)
 const pdfError = ref('')
+
+/** 翻译视图右栏：cn_ 译文 md 的内容、加载态、错误，以及是否已为当前文档加载过（懒加载用） */
+const translatedContent = ref('')
+const translatedLoading = ref(false)
+const translatedError = ref('')
+const translatedLoaded = ref(false)
 
 /** 拉取文档：URL 带 key 走 MinIO，否则读本地 VITE_APP_DOC_URL；页面其它部分不用动 */
 async function loadDoc() {
@@ -116,8 +135,41 @@ async function loadPdf() {
   }
 }
 
+/**
+ * 拉取 cn_ 译文 md：仅在首次切到「翻译」模式时按需加载，避免进页面就拉可能很大/可能不存在的译文。
+ * URL 带 key 走 MinIO；本地回退模式没有对应译文，给出提示。
+ */
+async function loadTranslated() {
+  if (!translatedKey.value) {
+    translatedError.value = '本地模式无对应译文 MD：请在 URL 带上 MinIO 对象路径（/markdown/<对象key>）'
+    translatedLoaded.value = true
+    return
+  }
+  translatedLoading.value = true
+  translatedError.value = ''
+  translatedContent.value = ''
+  try {
+    const text = await getObjectText(translatedKey.value)
+    // 大文档同样先让转圈绘制一帧再塞内容，避免渲染阻塞导致白屏
+    await nextTick()
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    translatedContent.value = text
+    await nextTick()
+  } catch (e: any) {
+    translatedError.value = `译文加载失败：${e?.message ?? '未知错误'}`
+  } finally {
+    translatedLoading.value = false
+    translatedLoaded.value = true
+  }
+}
+
 loadDoc()
 loadPdf()
+
+/** 首次切到「翻译」模式时按需加载译文；已加载过则不重复拉取 */
+watch(viewMode, (mode) => {
+  if (mode === 'split' && !translatedLoaded.value && !translatedLoading.value) loadTranslated()
+})
 
 /** ---------- 标注数据（Q&A 标签页） ---------- */
 
@@ -239,6 +291,11 @@ watch(docKey, () => {
   editingIndex.value = -1
   loadDoc()
   loadPdf()
+  // 换文档：译文重置为未加载；若当前正停在「翻译」模式则立即重新拉取
+  translatedLoaded.value = false
+  translatedContent.value = ''
+  translatedError.value = ''
+  if (viewMode.value === 'split') loadTranslated()
   tabs.value.forEach(loadTab)
 })
 
@@ -308,12 +365,12 @@ const leftPaneRef = ref<HTMLElement | null>(null)
 const rightPaneRef = ref<HTMLElement | null>(null)
 
 /* ------------------------------------------------------------------
- * 分栏模式滚动联动：左侧 PDF（PdfViewer 内部滚动容器）与右侧 MD 源码
- * 按「已滚动比例」双向同步。两边内容总长不同，故用比例而非像素映射。
- * scrollSyncing 用于切断「A 滚动 → 程序设置 B → B 又触发 scroll」的回环。
+ * 翻译模式滚动联动：左侧 PDF（PdfViewer 内部滚动容器）与右侧渲染后的译文
+ * （MarkdownPreview 内部滚动容器）按「已滚动比例」双向同步。两边内容总长不同，
+ * 故用比例而非像素映射。scrollSyncing 用于切断「A 滚动 → 程序设置 B → B 又触发 scroll」的回环。
  * ------------------------------------------------------------------ */
 const pdfViewerRef = ref<InstanceType<typeof PdfViewer> | null>(null)
-const mdSourceRef = ref<HTMLElement | null>(null)
+const translatedPreviewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
 let scrollSyncing = false
 
 /** 解除同步标记放在两帧之后：程序化滚动触发的 scroll 事件可能晚于当前任务派发 */
@@ -324,30 +381,20 @@ function releaseSyncGuard() {
 function syncScroll(from: 'pdf' | 'md', ratio: number) {
   if (viewMode.value !== 'split' || scrollSyncing) return
   scrollSyncing = true
-  if (from === 'pdf') {
-    const el = mdSourceRef.value
-    if (el) {
-      const max = el.scrollHeight - el.clientHeight
-      if (max > 0) el.scrollTop = ratio * max
-    }
-  } else {
-    pdfViewerRef.value?.scrollToRatio(ratio)
-  }
+  if (from === 'pdf') translatedPreviewRef.value?.setScrollRatio(ratio)
+  else pdfViewerRef.value?.scrollToRatio(ratio)
   releaseSyncGuard()
 }
 
-/** PDF 滚动：PdfViewer 上报 top/view/full，换算成 0~1 比例同步给源码栏 */
+/** PDF 滚动：PdfViewer 上报 top/view/full，换算成 0~1 比例同步给译文栏 */
 function onPdfScroll({ top, view, full }: { top: number; view: number; full: number }) {
   const max = full - view
   syncScroll('pdf', max > 0 ? top / max : 0)
 }
 
-/** MD 源码滚动：换算成 0~1 比例同步给 PDF 栏 */
-function onMdScroll() {
-  const el = mdSourceRef.value
-  if (!el) return
-  const max = el.scrollHeight - el.clientHeight
-  syncScroll('md', max > 0 ? el.scrollTop / max : 0)
+/** 译文滚动：MarkdownPreview 直接上报 0~1 比例，同步给 PDF 栏 */
+function onTranslatedScroll(ratio: number) {
+  syncScroll('md', ratio)
 }
 
 /** 隐藏浮动按钮（滚动 / 选区清空 / 开始翻译时） */
@@ -454,7 +501,7 @@ onBeforeUnmount(() => {
         <span v-if="loading" class="hint">加载中…</span>
         <el-radio-group v-model="viewMode" size="small">
           <el-radio-button value="preview">预览</el-radio-button>
-          <el-radio-button value="split">分栏</el-radio-button>
+          <el-radio-button value="split">翻译</el-radio-button>
           <el-radio-button value="source">原文</el-radio-button>
         </el-radio-group>
       </header>
@@ -498,13 +545,30 @@ onBeforeUnmount(() => {
           <div v-else class="empty">暂无 PDF</div>
         </div>
 
-        <!-- 原文只读查看 MD 源码：分栏时与 PDF 并排，两者按滚动比例联动 -->
-        <pre
-          ref="mdSourceRef"
-          v-show="viewMode === 'split' || viewMode === 'source'"
-          :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
-          @scroll="onMdScroll"
-        >{{ content }}</pre>
+        <!-- 翻译：右栏渲染 cn_ 译文 md，与左侧 PDF 按滚动比例联动 -->
+        <div
+          v-show="viewMode === 'split'"
+          v-loading="translatedLoading"
+          element-loading-text="译文加载中…"
+          class="md-translation-host"
+        >
+          <el-alert
+            v-if="translatedError"
+            :title="translatedError"
+            type="error"
+            show-icon
+            :closable="false"
+          />
+          <MarkdownPreview
+            v-else
+            ref="translatedPreviewRef"
+            :content="translatedContent"
+            @scroll="onTranslatedScroll"
+          />
+        </div>
+
+        <!-- 原文：只读查看原始 MD 源码（仅「原文」模式） -->
+        <pre v-show="viewMode === 'source'" class="md-source">{{ content }}</pre>
       </div>
     </section>
 
@@ -683,7 +747,7 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* 左侧：默认预览 PDF，可切到分栏（PDF + MD 源码）或只读 MD 原文 */
+/* 左侧：默认预览 PDF；「翻译」为 PDF + 渲染译文并排；「原文」只读 MD 源码 */
 .doc-body {
   display: flex;
   min-height: 0;
@@ -709,12 +773,6 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* 分栏时两个容器各占一半，中间加分隔线 */
-.md-source--split {
-  flex: 0 0 50%;
-  border-left: 1px solid #ebeef5;
-}
-
 .md-source {
   flex: 1;
   min-width: 0;
@@ -731,12 +789,19 @@ onBeforeUnmount(() => {
   background: #fff;
 }
 
-/* 翻译视图：与预览并排时占 50% */
+/* 翻译视图右栏：渲染 cn_ 译文，占右半，与左侧 PDF 之间加分隔线 */
 .md-translation-host {
   flex: 0 0 50%;
   min-width: 0;
   display: flex;
+  flex-direction: column;
   border-left: 1px solid #ebeef5;
+}
+
+/* MarkdownPreview 根节点撑满右栏并可滚动（min-height:0 才能在 flex 列里正确出滚动条） */
+.md-translation-host > :deep(.md-preview-host) {
+  flex: 1;
+  min-height: 0;
 }
 
 /* 已注释：编辑区样式（当前只需要预览）
