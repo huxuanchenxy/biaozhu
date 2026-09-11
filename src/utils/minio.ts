@@ -24,6 +24,13 @@ const QA_PATTERN = import.meta.env.VITE_ANNOTATION_QA_PATTERN || 'QA/{name}_qa.j
 const SFT_PATTERN = import.meta.env.VITE_ANNOTATION_SFT_PATTERN || 'SFT/{name}_sft.json'
 const COT_PATTERN = import.meta.env.VITE_ANNOTATION_COT_PATTERN || 'CoT/{name}_cot.json'
 
+/**
+ * 原始 PDF 的相对路径模板：相对 md 上级目录 <parent> 的上一级（即与 <parent> 同级），
+ * {name} 替换为 md 主名（去 .md）。默认 <grandparent>/{name}.pdf。
+ * 例：.../成品语料/<id>/MD/<id>.md -> .../成品语料/<id>.pdf。规则变动只改 .env。
+ */
+const PDF_PATTERN = import.meta.env.VITE_DOC_PDF_PATTERN || '{name}.pdf'
+
 /** 把模板里的 {name} 替换成 md 主名，并拼上 <parent>/ 前缀 */
 function applyPattern(pattern: string, prefix: string, name: string): string {
   return `${prefix}${pattern.replace(/\{name\}/g, name)}`
@@ -73,6 +80,28 @@ export function deriveAnnotationKeys(mdKey: string): {
   }
 }
 
+/**
+ * 由 md 的 object key 推导原始 PDF 的 object key。
+ *
+ * md 位于 <parent>/MD/<name>.md（<parent> 是装 MD 文件夹的目录，其目录名一般即文档 id）。
+ * 原始 PDF 与 <parent> 同级、以文档名 + .pdf 命名，即 <parent 的上级目录>/<name>.pdf。
+ * 例：.../成品语料/<id>/MD/<id>.md -> .../成品语料/<id>.pdf
+ * 规则可用 .env 的 VITE_DOC_PDF_PATTERN 覆盖（相对 <parent> 的上级目录，{name}=md 主名）。
+ */
+export function derivePdfKey(mdKey: string): string {
+  const key = normalizeObjectKey(mdKey).replace(/\\/g, '/')
+  const slash = key.lastIndexOf('/')
+  const mdDir = slash >= 0 ? key.slice(0, slash) : '' // <parent>/MD
+  const parentSlash = mdDir.lastIndexOf('/')
+  const parent = parentSlash >= 0 ? mdDir.slice(0, parentSlash) : '' // <parent>（装 MD 的目录）
+  const grandSlash = parent.lastIndexOf('/')
+  const grandparent = grandSlash >= 0 ? parent.slice(0, grandSlash) : '' // <parent> 的上级
+  const fileName = slash >= 0 ? key.slice(slash + 1) : key // <name>.md
+  const name = fileName.replace(/\.md$/i, '') // <name>
+  const prefix = grandparent ? `${grandparent}/` : ''
+  return applyPattern(PDF_PATTERN, prefix, name)
+}
+
 /** 是否已具备访问 MinIO 的必要配置（前端只需桶名） */
 export function isMinioConfigured(): boolean {
   return Boolean(MINIO_BUCKET)
@@ -112,4 +141,31 @@ export async function getObjectText(key: string): Promise<string> {
     throw new Error(`读取文件失败 HTTP ${res.status}：${objectKey}`)
   }
   return await res.text()
+}
+
+/**
+ * 按对象 key 读取二进制内容并生成 blob: 对象 URL（用于 PDF 等在 <iframe> 里直接预览）。
+ * 走与 getObjectText 相同的后端下载接口，只是取 arrayBuffer 并强制标记 MIME，
+ * 避免后端未返回正确 Content-Type 时浏览器把 PDF 当下载或纯文本处理。
+ * 注意：调用方在不再需要该 URL（切换文档 / 组件卸载）时必须 URL.revokeObjectURL 释放。
+ */
+export async function getObjectBlobUrl(key: string, mime = 'application/pdf'): Promise<string> {
+  if (!isMinioConfigured()) {
+    throw new Error('MinIO 未配置（检查 .env 里的 VITE_MINIO_BUCKET）')
+  }
+  const objectKey = normalizeObjectKey(key)
+  if (!objectKey) throw new Error('对象路径为空')
+  if (objectKey.includes('//')) {
+    throw new Error(
+      `对象路径含空目录段（连续 "//"）：${objectKey}。请先修正对象 key（去掉空目录）后重试。`,
+    )
+  }
+  const full = fullObjectPath(objectKey)
+  const url = `${API_DIRECT_BASE}/file/download?fullObjectPath=${encodeURIComponent(full)}`
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`读取文件失败 HTTP ${res.status}：${objectKey}`)
+  }
+  const buffer = await res.arrayBuffer()
+  return URL.createObjectURL(new Blob([buffer], { type: mime }))
 }

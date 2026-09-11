@@ -4,10 +4,9 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { MdPreview } from 'md-editor-v3'
 import 'md-editor-v3/lib/preview.css'
-import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
-import { deriveAnnotationKeys, getObjectText } from '@/utils/minio'
+import { deriveAnnotationKeys, derivePdfKey, getObjectBlobUrl, getObjectText } from '@/utils/minio'
 import { TranslationEngine } from '@/utils/translator'
 
 /**
@@ -33,9 +32,17 @@ const docKey = computed(() => {
 const annotationKeys = computed(() => (docKey.value ? deriveAnnotationKeys(docKey.value) : null))
 
 /**
- * 左栏展示模式：默认预览；分栏时预览与原文并排且滚动同步。
- * 翻译改为「选中一段再译」（见下方选段翻译），不再有整篇翻译页签。
- * 需要恢复编辑能力时，把 'edit' 加回来并接上下面的编辑区即可。
+ * 由 md 的 key 推导原始 PDF 的 key（PDF 与装 MD 的目录同级、文档名 + .pdf）；无 docKey 时为空串。
+ * 规则见 utils/minio 的 derivePdfKey，可用 .env 的 VITE_DOC_PDF_PATTERN 覆盖。
+ */
+const pdfKey = computed(() => (docKey.value ? derivePdfKey(docKey.value) : ''))
+
+/**
+ * 左栏展示模式：
+ *   preview 预览——显示由 md 路径推导出的原始 PDF（浏览器原生阅读器）；
+ *   split   分栏——PDF 与 MD 源码并排，各自独立滚动（PDF 在 iframe 内，无法与源码同步）；
+ *   source  原文——只读查看 MD 源码。
+ * 翻译为「选中一段再译」（见下方选段翻译）；PDF 内划选不触发翻译，MD 源码与右侧标注可。
  */
 type ViewMode = 'preview' | 'split' | 'source'
 const viewMode = ref<ViewMode>('preview')
@@ -50,6 +57,11 @@ const viewMode = ref<ViewMode>('preview')
 const content = ref('')
 const loading = ref(false)
 const loadError = ref('')
+
+/** PDF 预览：blob 对象 URL（供 <iframe> 直接渲染）、加载态、错误信息 */
+const pdfUrl = ref('')
+const pdfLoading = ref(false)
+const pdfError = ref('')
 
 /** 拉取文档：URL 带 key 走 MinIO，否则读本地 VITE_APP_DOC_URL；页面其它部分不用动 */
 async function loadDoc() {
@@ -80,7 +92,31 @@ async function loadDoc() {
   loading.value = false
 }
 
+/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供 <iframe> 预览 */
+async function loadPdf() {
+  // 切换文档前先释放上一次的 blob URL，避免内存泄漏
+  if (pdfUrl.value) {
+    URL.revokeObjectURL(pdfUrl.value)
+    pdfUrl.value = ''
+  }
+  pdfError.value = ''
+  if (!pdfKey.value) {
+    // 本地回退模式（URL 没带对象 key）没有对应 PDF，给出可操作提示
+    pdfError.value = '本地模式无对应 PDF：请在 URL 带上 MinIO 对象路径（/markdown/<对象key>）'
+    return
+  }
+  pdfLoading.value = true
+  try {
+    pdfUrl.value = await getObjectBlobUrl(pdfKey.value)
+  } catch (e: any) {
+    pdfError.value = `PDF 加载失败：${e?.message ?? '未知错误'}`
+  } finally {
+    pdfLoading.value = false
+  }
+}
+
 loadDoc()
+loadPdf()
 
 /** ---------- 标注数据（Q&A 标签页） ---------- */
 
@@ -201,6 +237,7 @@ watch(docKey, () => {
   currentPage.value = 1
   editingIndex.value = -1
   loadDoc()
+  loadPdf()
   tabs.value.forEach(loadTab)
 })
 
@@ -244,79 +281,10 @@ async function saveEdit() {
   }
 }
 
-const previewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
-
-/** ---------- 预览 / 原文 滚动同步 ---------- */
-const sourceRef = ref<HTMLElement | null>(null)
-/** 最近一次滚动比例，切换模式时用来把位置带过去 */
-const lastRatio = ref(0)
-
-/**
- * 谁在主动滚。被动那一方设置 scrollTop 也会触发 scroll 事件，
- * 不锁住的话两边会互相拉扯，出现抖动。
- */
-let syncOwner: 'preview' | 'source' | null = null
-let syncTimer: ReturnType<typeof setTimeout> | undefined
-
-function setScrollRatio(el: HTMLElement | null, ratio: number) {
-  if (!el) return
-  const max = el.scrollHeight - el.clientHeight
-  el.scrollTop = Math.max(0, Math.min(max, ratio * max))
-}
-
-/**
- * 各模式下只允许两端互相同步：
- *   split ↔ preview ↔ source
- * 单栏模式只记录 lastRatio，不同步。
- */
-function syncScroll(from: 'preview' | 'source', ratio: number) {
-  lastRatio.value = ratio
-  if (syncOwner && syncOwner !== from) return
-  syncOwner = from
-  if (syncTimer) clearTimeout(syncTimer)
-  syncTimer = setTimeout(() => {
-    syncOwner = null
-    syncTimer = undefined
-  }, 120)
-
-  if (viewMode.value === 'split') {
-    if (from === 'preview') setScrollRatio(sourceRef.value, ratio)
-    else if (from === 'source') previewRef.value?.setScrollRatio(ratio)
-  }
-}
-
-function onPreviewScroll(ratio: number) {
-  hideSelBtn()
-  syncScroll('preview', ratio)
-}
-
-function onSourceScroll() {
-  syncScroll('source', getRatio(sourceRef.value))
-}
-
-function getRatio(el: HTMLElement | null) {
-  if (!el) return 0
-  const max = el.scrollHeight - el.clientHeight
-  return max > 0 ? el.scrollTop / max : 0
-}
-
-/** 切换模式后把滚动位置按比例搬过去，避免从头开始看 */
-watch(viewMode, (mode) => {
-  nextTick(() => {
-    if (mode === 'split') {
-      previewRef.value?.setScrollRatio(lastRatio.value)
-      setScrollRatio(sourceRef.value, lastRatio.value)
-    } else if (mode === 'preview') {
-      previewRef.value?.setScrollRatio(lastRatio.value)
-    } else if (mode === 'source') {
-      setScrollRatio(sourceRef.value, lastRatio.value)
-    }
-  })
-})
-
 /* ------------------------------------------------------------------
- * 选段翻译：在预览里划选一段 → 选区上方浮现「翻译」按钮 → 弹窗展示该段译文。
+ * 选段翻译：在 MD 源码或右侧标注卡片里划选一段 → 选区上方浮现「翻译」按钮 → 弹窗展示译文。
  * 取代原来的整篇翻译（太慢），只把选中片段提交给 Dify。
+ * 注：PDF 预览在 <iframe> 内，选区不被父页捕获，故 PDF 上划选不触发翻译。
  * ------------------------------------------------------------------ */
 const engine = new TranslationEngine()
 /** 当前划选的文本 */
@@ -428,6 +396,8 @@ onMounted(() => document.addEventListener('mouseup', onDocMouseUp))
 onBeforeUnmount(() => {
   document.removeEventListener('mouseup', onDocMouseUp)
   engine.destroy()
+  // 释放 PDF 的 blob 对象 URL
+  if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value)
 })
 </script>
 
@@ -446,7 +416,7 @@ onBeforeUnmount(() => {
       </header>
 
       <div
-        v-loading="loading"
+        v-loading="loading || pdfLoading"
         element-loading-text="文档加载中…"
         class="pane-body doc-body"
       >
@@ -463,19 +433,26 @@ onBeforeUnmount(() => {
         />
         -->
 
-        <MarkdownPreview
+        <!-- 预览：显示由 md 路径推导出的原始 PDF（浏览器原生阅读器，用 blob URL 承载） -->
+        <div
           v-show="viewMode !== 'source'"
-          ref="previewRef"
-          :content="content"
-          @scroll="onPreviewScroll"
-        />
+          :class="['pdf-host', { 'pdf-host--split': viewMode === 'split' }]"
+        >
+          <el-alert
+            v-if="pdfError"
+            :title="pdfError"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <iframe v-else-if="pdfUrl" :src="pdfUrl" class="pdf-frame" title="PDF 预览" />
+          <div v-else class="empty">暂无 PDF</div>
+        </div>
 
-        <!-- 原文只读查看：用 v-show 保住预览区 DOM，切回来时高亮和滚动位置都还在 -->
+        <!-- 原文只读查看 MD 源码：分栏时与 PDF 并排，两者各自独立滚动 -->
         <pre
           v-show="viewMode === 'split' || viewMode === 'source'"
-          ref="sourceRef"
           :class="['md-source', { 'md-source--split': viewMode === 'split' }]"
-          @scroll.passive="onSourceScroll"
         >{{ content }}</pre>
       </div>
     </section>
@@ -655,11 +632,31 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* 左侧：默认预览，可切到分栏（滚动同步）或只读原文 */
+/* 左侧：默认预览 PDF，可切到分栏（PDF + MD 源码）或只读 MD 原文 */
 .doc-body {
   display: flex;
   min-height: 0;
   overflow: hidden;
+}
+
+/* PDF 预览宿主：预览模式占满，分栏时占左半；内部 iframe 撑满 */
+.pdf-host {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+
+.pdf-host--split {
+  flex: 0 0 50%;
+}
+
+.pdf-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
 }
 
 /* 分栏时两个容器各占一半，中间加分隔线 */
