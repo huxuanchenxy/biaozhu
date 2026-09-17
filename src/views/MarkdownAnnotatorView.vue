@@ -211,7 +211,7 @@ const tabs = ref<QaTab[]>([
     file: 'BE1020801A3_cot.json',
     minioField: 'cot',
     qField: 'question',
-    aField: 'scenario',
+    aField: 'answer',
     status: 'loading',
     error: '',
     records: [],
