@@ -3,14 +3,12 @@
  *
  * md 原文与三个标注 json 都通过后端下载接口获取（直连，不走代理）：
  *   GET <VITE_API_DIRECT_BASE>/file/download?fullObjectPath=/<bucket>/<key>（fullObjectPath 需 URL 编码）
- * 前端不持有任何 MinIO 密钥；桶名（VITE_MINIO_BUCKET）仅用于拼 fullObjectPath 前缀。
+ * 前端不持有任何 MinIO 密钥；桶名不再写死于环境变量，而是**从 URL 动态取**——
+ * 路由约定 /markdown/<bucket>/<objectKey>，即路由 key 的第一段就是桶名，整体即 fullObjectPath 的主体。
  *
- * 路径规则不变：视图拿到 md 的 key 后，用 deriveAnnotationKeys 推出 QA/SFT/CoT 三个 json 的 key，
+ * 路径规则不变：视图拿到 md 的 key（含桶名）后，用 deriveAnnotationKeys 推出 QA/SFT/CoT 三个 json 的 key，
  * 再分别调 getObjectText 去后端下载。
  */
-
-/** 存储桶名称：仅用于拼下载/上传接口需要的 fullObjectPath 前缀（/<bucket>/<key>） */
-const MINIO_BUCKET = import.meta.env.VITE_MINIO_BUCKET || ''
 
 /** 后端文件接口直连基址（含 /api），md 与标注 json 都从 /file/download 取；不走代理 */
 const API_DIRECT_BASE = (import.meta.env.VITE_API_DIRECT_BASE || '/api').replace(/\/$/, '')
@@ -40,19 +38,15 @@ function applyPattern(pattern: string, prefix: string, name: string): string {
 }
 
 /**
- * 规范化对象 key：
- *   - 去掉开头的 '/'（S3 key 不以 / 开头）
- *   - 若 URL 里带上了桶名前缀（如 /drivdernet_abc/xxx），自动剥掉桶名
+ * 规范化对象完整路径（含桶名）：仅去掉开头的 '/'。
+ * 桶名来自 URL（路由 key 的第一段），此处**不再**按环境变量剥离桶名，
+ * 否则会把 materialsproject 这类真实桶名当成普通目录再前置写死的桶，导致路径出错。
  * 注意：这里**不**折叠重复斜杠。对象 key 可能真实包含空目录段（'a//b'，
  * 即 MinIO 里名为 '/' 的空文件夹），折叠会指向一个不存在的 key。
- * 例：'/drivdernet_abc/a/b.md' -> 'a/b.md'
+ * 例：'/materialsproject/a/b.md' -> 'materialsproject/a/b.md'
  */
 export function normalizeObjectKey(raw: string): string {
-  let key = (raw || '').replace(/^\/+/, '')
-  if (MINIO_BUCKET && (key === MINIO_BUCKET || key.startsWith(`${MINIO_BUCKET}/`))) {
-    key = key.slice(MINIO_BUCKET.length).replace(/^\/+/, '')
-  }
-  return key
+  return (raw || '').replace(/^\/+/, '')
 }
 
 /**
@@ -118,17 +112,21 @@ export function deriveTranslatedMdKey(mdKey: string): string {
   return `${dir}${TRANSLATED_MD_PREFIX}${fileName}`
 }
 
-/** 是否已具备访问 MinIO 的必要配置（前端只需桶名） */
+/**
+ * 是否具备读取条件：后端直连基址已配置即可。
+ * 桶名由 URL 动态提供，不再依赖环境变量，故此判断只校验直连基址。
+ */
 export function isMinioConfigured(): boolean {
-  return Boolean(MINIO_BUCKET)
+  return Boolean(API_DIRECT_BASE)
 }
 
 /**
- * 拼出后端 uploadOverwrite 接口需要的完整对象路径：/<bucket>/<key>（含桶名前缀与开头斜杠，空格等保持原样不编码）。
- * 例：key='a/b/Cot/x.json' -> '/drivdernet_abc/a/b/Cot/x.json'
+ * 拼出后端 download/uploadOverwrite 接口需要的完整对象路径：/<bucket>/<key>（含开头斜杠，空格等保持原样不编码）。
+ * 桶名即传入 key 的第一段（来自 URL），不再前置写死的环境变量桶名。
+ * 例：key='materialsproject/a/CoT/x.json' -> '/materialsproject/a/CoT/x.json'
  */
 export function fullObjectPath(key: string): string {
-  return `/${MINIO_BUCKET}/${normalizeObjectKey(key)}`
+  return `/${normalizeObjectKey(key)}`
 }
 
 /**
@@ -138,7 +136,7 @@ export function fullObjectPath(key: string): string {
  */
 export async function getObjectText(key: string): Promise<string> {
   if (!isMinioConfigured()) {
-    throw new Error('MinIO 未配置（检查 .env 里的 VITE_MINIO_BUCKET）')
+    throw new Error('后端文件直连基址未配置（检查 .env 里的 VITE_API_DIRECT_BASE）')
   }
   const objectKey = normalizeObjectKey(key)
   if (!objectKey) throw new Error('对象路径为空')
@@ -167,7 +165,7 @@ export async function getObjectText(key: string): Promise<string> {
  */
 export async function getObjectBlobUrl(key: string, mime = 'application/pdf'): Promise<string> {
   if (!isMinioConfigured()) {
-    throw new Error('MinIO 未配置（检查 .env 里的 VITE_MINIO_BUCKET）')
+    throw new Error('后端文件直连基址未配置（检查 .env 里的 VITE_API_DIRECT_BASE）')
   }
   const objectKey = normalizeObjectKey(key)
   if (!objectKey) throw new Error('对象路径为空')
