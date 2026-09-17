@@ -23,6 +23,28 @@ const SFT_PATTERN = import.meta.env.VITE_ANNOTATION_SFT_PATTERN || 'SFT/{name}_s
 const COT_PATTERN = import.meta.env.VITE_ANNOTATION_COT_PATTERN || 'CoT/{name}_cot.json'
 
 /**
+ * SFT 模板按桶区分（可选）：格式 `<bucket>=<pattern>`，多条用 `|` 分隔。
+ * 例：materialsproject=SFT/{name}_alpaca.json|drivdernet_abc=SFT/{name}_sft.json
+ * 未命中的桶回退到 SFT_PATTERN（VITE_ANNOTATION_SFT_PATTERN）。
+ */
+function parseBucketPatterns(raw?: string): Record<string, string> {
+  const map: Record<string, string> = {}
+  if (!raw) return map
+  for (const entry of raw.split('|')) {
+    const eq = entry.indexOf('=')
+    if (eq <= 0) continue
+    const bucket = entry.slice(0, eq).trim()
+    const pattern = entry.slice(eq + 1).trim()
+    if (bucket && pattern) map[bucket] = pattern
+  }
+  return map
+}
+
+const SFT_PATTERN_BY_BUCKET = parseBucketPatterns(
+  import.meta.env.VITE_ANNOTATION_SFT_PATTERN_BY_BUCKET,
+)
+
+/**
  * 原始 PDF 的相对路径模板：相对 md 上级目录 <parent> 的上一级（即与 <parent> 同级），
  * {name} 替换为 md 主名（去 .md）。默认 <grandparent>/{name}.pdf。
  * 例：.../成品语料/<id>/MD/<id>.md -> .../成品语料/<id>.pdf。规则变动只改 .env。
@@ -55,7 +77,8 @@ export function normalizeObjectKey(raw: string): string {
  * md 位于 <parent>/MD/<name>.md；三个 json 的相对路径由 .env 里的模板决定
  * （见 QA_PATTERN/SFT_PATTERN/COT_PATTERN），模板相对 <parent>，{name} 替换为 md 主名。
  * 默认：QA/{name}_qa.json、SFT/{name}_sft.json、CoT/{name}_cot.json。
- * 后缀（如 _sft.json）或文件夹名变动时，只改 .env 配置即可。
+ * SFT 模板可按桶区分（VITE_ANNOTATION_SFT_PATTERN_BY_BUCKET）：桶名即 key 第一段，
+ * 命中则用该桶的模板，否则回退到 SFT_PATTERN。后缀或文件夹名变动时，只改 .env 配置即可。
  */
 export function deriveAnnotationKeys(mdKey: string): {
   qa: string
@@ -70,9 +93,13 @@ export function deriveAnnotationKeys(mdKey: string): {
   const fileName = slash >= 0 ? key.slice(slash + 1) : key // <name>.md
   const name = fileName.replace(/\.md$/i, '') // <name>
   const prefix = parent ? `${parent}/` : ''
+  // 桶名即 key 第一段（来自 URL /markdown/<bucket>/<objectKey>），用于按桶选择 SFT 模板
+  const bucketSlash = key.indexOf('/')
+  const bucket = bucketSlash >= 0 ? key.slice(0, bucketSlash) : key
+  const sftPattern = SFT_PATTERN_BY_BUCKET[bucket] || SFT_PATTERN
   return {
     qa: applyPattern(QA_PATTERN, prefix, name),
-    alpaca: applyPattern(SFT_PATTERN, prefix, name),
+    alpaca: applyPattern(sftPattern, prefix, name),
     cot: applyPattern(COT_PATTERN, prefix, name),
   }
 }

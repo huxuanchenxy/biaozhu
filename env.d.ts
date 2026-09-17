@@ -32,6 +32,12 @@ interface ImportMetaEnv {
   readonly VITE_ANNOTATION_QA_PATTERN: string
   /** 标注 json 相对路径模板：SFT（对应 Alpaca/SFT 标签页） */
   readonly VITE_ANNOTATION_SFT_PATTERN: string
+  /**
+   * SFT 模板按桶区分（可选）：格式 `<bucket>=<pattern>`，多条用 `|` 分隔。
+   * 例：materialsproject=SFT/{name}_alpaca.json|drivdernet_abc=SFT/{name}_sft.json
+   * 未命中的桶回退到 VITE_ANNOTATION_SFT_PATTERN。
+   */
+  readonly VITE_ANNOTATION_SFT_PATTERN_BY_BUCKET: string
   /** 标注 json 相对路径模板：CoT */
   readonly VITE_ANNOTATION_COT_PATTERN: string
   /** 开发服务器端口 */
