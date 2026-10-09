@@ -502,7 +502,6 @@ onBeforeUnmount(() => {
         <el-radio-group v-model="viewMode" size="small">
           <el-radio-button value="preview">预览</el-radio-button>
           <el-radio-button value="split">翻译</el-radio-button>
-          <el-radio-button value="source">原文</el-radio-button>
         </el-radio-group>
       </header>
 
