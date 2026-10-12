@@ -85,7 +85,15 @@ async function load() {
   errorMsg.value = ''
   const token = renderToken
   try {
-    const task = pdfjsLib.getDocument({ url: props.src })
+    // cMapUrl / standardFontDataUrl 指向 serve-pdfjs-assets 插件暴露的静态资源（dev 中间件、build 拷贝）。
+    // 老式国内转换器生成的标准 PDF 常用 CID/CJK 编码（如 GBK-EUC-H），缺 cMap 时 pdf.js 无法解码中文，
+    // 会整段乱码/丢字；字体未内嵌时再靠 standardFontData + 系统字体回退渲染。
+    const task = pdfjsLib.getDocument({
+      url: props.src,
+      cMapUrl: `${import.meta.env.BASE_URL}pdfjs/cmaps/`,
+      cMapPacked: true,
+      standardFontDataUrl: `${import.meta.env.BASE_URL}pdfjs/standard_fonts/`,
+    })
     const d = await task.promise
     if (token !== renderToken) {
       d.destroy().catch(() => undefined)

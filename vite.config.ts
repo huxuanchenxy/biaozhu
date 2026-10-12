@@ -29,6 +29,10 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue(), copyRuntimeFiles(env.VITE_OUT_DIR || 'dist')],
 
+    // mupdf 用了 top-level await 且含被条件保护的 node:fs 动态导入，排除出预构建，
+    // 交由 Vite 直接服务/打包（wasm 经 new URL(..., import.meta.url) 作为资源产出）。
+    optimizeDeps: { exclude: ['mupdf'] },
+
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -64,6 +68,8 @@ export default defineConfig(({ mode }) => {
 
     build: {
       outDir: env.VITE_OUT_DIR || 'dist',
+      // mupdf 的 top-level await 需要 esnext 目标（默认 es2020 不支持 TLA）
+      target: 'esnext',
       // 关闭后不生成 .map，包更小；需要线上排错可改为 true
       sourcemap: false,
       chunkSizeWarningLimit: 1500,

@@ -14,7 +14,7 @@ import {
   getObjectText,
 } from '@/utils/minio'
 import { TranslationEngine } from '@/utils/translator'
-import PdfViewer from '@/components/PdfViewer.vue'
+import PdfViewerMupdf from '@/components/PdfViewerMupdf.vue'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 
 /**
@@ -61,6 +61,14 @@ const translatedKey = computed(() => (docKey.value ? deriveTranslatedMdKey(docKe
 type ViewMode = 'preview' | 'split' | 'source'
 const viewMode = ref<ViewMode>('preview')
 
+/**
+ * PDF 统一用 MuPDF(WASM) 自绘渲染（PdfViewerMupdf）：
+ *   - 中文正常：MuPDF 自带 CJK 字体回退，能渲染这类未内嵌中文字体的老 PDF；
+ *   - 背景可控：页面被画成白底 PNG，不受浏览器/系统深色主题影响；
+ *   - 可联动：滚动在自有容器内，能与译文按滚动比例双向同步。
+ * （PdfViewer=pdf.js、PdfViewerNative=内置查看器 两个组件保留备用。）
+ */
+
 /* ------------------------------------------------------------------
  * 已注释：可编辑的文档内容（当前只需要预览 + 只读看原文）
  * ------------------------------------------------------------------ */
@@ -72,7 +80,7 @@ const content = ref('')
 const loading = ref(false)
 const loadError = ref('')
 
-/** PDF 预览：blob 对象 URL（供 PdfViewer 渲染）、加载态、错误信息 */
+/** PDF 预览：blob 对象 URL（供原生渲染器显示）、加载态、错误信息 */
 const pdfUrl = ref('')
 const pdfLoading = ref(false)
 const pdfError = ref('')
@@ -112,7 +120,7 @@ async function loadDoc() {
   loading.value = false
 }
 
-/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供 PdfViewer 渲染 */
+/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供原生渲染器显示 */
 async function loadPdf() {
   // 切换文档前先释放上一次的 blob URL，避免内存泄漏
   if (pdfUrl.value) {
@@ -365,11 +373,11 @@ const leftPaneRef = ref<HTMLElement | null>(null)
 const rightPaneRef = ref<HTMLElement | null>(null)
 
 /* ------------------------------------------------------------------
- * 翻译模式滚动联动：左侧 PDF（PdfViewer 内部滚动容器）与右侧渲染后的译文
+ * 翻译模式滚动联动：左侧 PDF（PdfViewerMupdf 内部滚动容器）与右侧译文
  * （MarkdownPreview 内部滚动容器）按「已滚动比例」双向同步。两边内容总长不同，
  * 故用比例而非像素映射。scrollSyncing 用于切断「A 滚动 → 程序设置 B → B 又触发 scroll」的回环。
  * ------------------------------------------------------------------ */
-const pdfViewerRef = ref<InstanceType<typeof PdfViewer> | null>(null)
+const pdfViewerRef = ref<InstanceType<typeof PdfViewerMupdf> | null>(null)
 const translatedPreviewRef = ref<InstanceType<typeof MarkdownPreview> | null>(null)
 let scrollSyncing = false
 
@@ -386,7 +394,7 @@ function syncScroll(from: 'pdf' | 'md', ratio: number) {
   releaseSyncGuard()
 }
 
-/** PDF 滚动：PdfViewer 上报 top/view/full，换算成 0~1 比例同步给译文栏 */
+/** PDF 滚动：上报 top/view/full，换算成 0~1 比例同步给译文栏 */
 function onPdfScroll({ top, view, full }: { top: number; view: number; full: number }) {
   const max = full - view
   syncScroll('pdf', max > 0 ? top / max : 0)
@@ -523,7 +531,7 @@ onBeforeUnmount(() => {
         />
         -->
 
-        <!-- 预览：显示由 md 路径推导出的原始 PDF（pdf.js 自渲染，滚动容器可与原文联动） -->
+        <!-- 预览/翻译：显示由 md 路径推导出的原始 PDF（MuPDF 自绘，白底、中文保真） -->
         <div
           v-show="viewMode !== 'source'"
           :class="['pdf-host', { 'pdf-host--split': viewMode === 'split' }]"
@@ -535,7 +543,7 @@ onBeforeUnmount(() => {
             show-icon
             :closable="false"
           />
-          <PdfViewer
+          <PdfViewerMupdf
             v-else-if="pdfUrl"
             ref="pdfViewerRef"
             :src="pdfUrl"

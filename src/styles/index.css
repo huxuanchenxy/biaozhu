@@ -1,5 +1,7 @@
 :root {
   --app-header-height: 60px;
+  /* 全局只支持浅色：让浏览器 UA 控件（含内置 PDF 查看器外壳）不跟随系统深色模式 */
+  color-scheme: light only;
 }
 
 * {
