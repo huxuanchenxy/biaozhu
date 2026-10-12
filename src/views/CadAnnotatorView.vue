@@ -56,6 +56,12 @@ const selectedIndex = ref(0)
 /** 每张图的真实像素尺寸（@load 后写入），用于 SVG viewBox 换算 */
 const dims = reactive<Record<string, { w: number; h: number }>>({})
 
+/**
+ * 悬停坐标：记录当前悬停图片、光标在图内的显示像素偏移，以及换算后的图片真实像素坐标。
+ * left/top 用于定位跟随光标的标签；natX/natY 为标注 JSON 同系的像素坐标（十字线也用它）。
+ */
+const hover = reactive({ key: '', show: false, left: 0, top: 0, natX: 0, natY: 0 })
+
 /** 当前选中图片 */
 const currentImage = computed<CadImage | null>(() => images.value[selectedIndex.value] ?? null)
 
@@ -127,6 +133,25 @@ function pointsAttr(box: CadBox): string {
 function onImgLoad(key: string, e: Event) {
   const img = e.target as HTMLImageElement
   dims[key] = { w: img.naturalWidth, h: img.naturalHeight }
+}
+
+/** 鼠标在图上移动：换算出光标处的图片真实像素坐标（按显示尺寸↔自然尺寸比例） */
+function onImgMove(img: CadImage, e: MouseEvent) {
+  const el = e.currentTarget as HTMLImageElement
+  const rect = el.getBoundingClientRect()
+  const offX = e.clientX - rect.left
+  const offY = e.clientY - rect.top
+  const d = dims[img.key]
+  hover.key = img.key
+  hover.left = offX
+  hover.top = offY
+  hover.natX = d && rect.width ? Math.round((offX / rect.width) * d.w) : 0
+  hover.natY = d && rect.height ? Math.round((offY / rect.height) * d.h) : 0
+  hover.show = true
+}
+
+function onImgLeave() {
+  hover.show = false
 }
 
 function selectImage(i: number) {
@@ -248,23 +273,61 @@ watch(rawKey, load)
             <el-button size="small" round>✋ 抓手</el-button>
           </div>
           <div class="img-stage">
-            <img :src="cadObjectUrl(img.key)" :alt="img.name" class="img-el" @load="onImgLoad(img.key, $event)" />
-            <svg
-              v-if="dims[img.key]"
-              class="img-overlay"
-              :viewBox="`0 0 ${dims[img.key].w} ${dims[img.key].h}`"
-              preserveAspectRatio="none"
-            >
-              <g v-for="(box, bi) in img.boxes" :key="bi">
-                <polygon
-                  :points="pointsAttr(box)"
-                  fill="none"
-                  :stroke="boxColor(bi)"
-                  :stroke-width="activeBox === box ? 3 : 1.5"
-                  :opacity="activeBox && activeBox !== box ? 0.45 : 1"
-                />
-              </g>
-            </svg>
+            <div class="img-wrap">
+              <img
+                :src="cadObjectUrl(img.key)"
+                :alt="img.name"
+                class="img-el"
+                @load="onImgLoad(img.key, $event)"
+                @mousemove="onImgMove(img, $event)"
+                @mouseleave="onImgLeave"
+              />
+              <svg
+                v-if="dims[img.key]"
+                class="img-overlay"
+                :viewBox="`0 0 ${dims[img.key].w} ${dims[img.key].h}`"
+                preserveAspectRatio="none"
+              >
+                <g v-for="(box, bi) in img.boxes" :key="bi">
+                  <polygon
+                    :points="pointsAttr(box)"
+                    fill="none"
+                    :stroke="boxColor(bi)"
+                    :stroke-width="activeBox === box ? 3 : 1.5"
+                    :opacity="activeBox && activeBox !== box ? 0.45 : 1"
+                  />
+                </g>
+                <!-- 十字辅助线（悬停时）：用自然像素坐标，non-scaling-stroke 保证线宽不受拉伸影响 -->
+                <g v-if="hover.show && hover.key === img.key && dims[img.key]">
+                  <line
+                    :x1="hover.natX"
+                    y1="0"
+                    :x2="hover.natX"
+                    :y2="dims[img.key].h"
+                    stroke="#9ca3af"
+                    stroke-dasharray="6 6"
+                    vector-effect="non-scaling-stroke"
+                  />
+                  <line
+                    x1="0"
+                    :y1="hover.natY"
+                    :x2="dims[img.key].w"
+                    :y2="hover.natY"
+                    stroke="#9ca3af"
+                    stroke-dasharray="6 6"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </g>
+              </svg>
+              <!-- 跟随光标的坐标标签（HTML，不受 SVG 拉伸影响） -->
+              <div
+                v-if="hover.show && hover.key === img.key"
+                class="coord-label"
+                :style="{ left: hover.left + 'px', top: hover.top + 'px' }"
+              >
+                X: {{ hover.natX }}, Y: {{ hover.natY }}
+              </div>
+            </div>
           </div>
         </article>
       </div>
@@ -409,6 +472,11 @@ watch(rawKey, load)
   background: #fafafa;
 }
 
+/* 包裹 img 与其叠加层/标签，尺寸与 img 完全一致，便于绝对定位对齐 */
+.img-wrap {
+  position: relative;
+}
+
 .img-el {
   display: block;
   width: 100%;
@@ -417,12 +485,23 @@ watch(rawKey, load)
 
 .img-overlay {
   position: absolute;
-  /* 与 .img-stage 的 12px 内边距对齐，覆盖 img 实际绘制区域 */
-  top: 12px;
-  left: 12px;
-  width: calc(100% - 24px);
-  height: calc(100% - 24px);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
+}
+
+/* 跟随光标的坐标标签（红色，与截图一致） */
+.coord-label {
+  position: absolute;
+  z-index: 2;
+  transform: translate(10px, -50%);
+  padding: 0 2px;
+  font-size: 13px;
+  color: #ef4444;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 2px #fff, 0 0 2px #fff;
 }
 
 /* 右：标注列表 */
