@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -57,10 +57,116 @@ const selectedIndex = ref(0)
 const dims = reactive<Record<string, { w: number; h: number }>>({})
 
 /**
- * 悬停坐标：记录当前悬停图片、光标在图内的显示像素偏移，以及换算后的图片真实像素坐标。
+ * 悬停坐标：记录当前悬停图片、光标在视口(.img-stage)内的显示像素偏移，以及换算后的图片真实像素坐标。
  * left/top 用于定位跟随光标的标签；natX/natY 为标注 JSON 同系的像素坐标（十字线也用它）。
  */
 const hover = reactive({ key: '', show: false, left: 0, top: 0, natX: 0, natY: 0 })
+
+/**
+ * 每张图独立的变换与交互态：
+ *  - transforms[key] = { scale, x, y }：作用于 .img-wrap 的 translate+scale（transform-origin 0 0）。
+ *  - panMode[key]：是否开启「抓手/拖动」模式。开启后拖动平移、滚轮失效；关闭时滚轮缩放、不响应拖动。
+ */
+interface CadTransform {
+  scale: number
+  x: number
+  y: number
+}
+const transforms = reactive<Record<string, CadTransform>>({})
+const panMode = reactive<Record<string, boolean>>({})
+const MIN_SCALE = 0.1
+const MAX_SCALE = 8
+
+/** 每张图的默认适配态（contain：整张图完整可见并居中），加载完成/双击复位时回到这个态 */
+const fits = reactive<Record<string, CadTransform>>({})
+
+function tf(key: string): CadTransform {
+  if (!transforms[key]) transforms[key] = { scale: 1, x: 0, y: 0 }
+  return transforms[key]
+}
+
+/**
+ * 计算并应用 contain 适配：图片按宽度铺满时若高度超出视口，则整体缩小到刚好全显并居中；
+ * 未超出则保持 1×，仅垂直居中。wrap 布局原点在视口左上角（transform-origin 0 0）。
+ */
+function applyFit(key: string, stage: HTMLElement) {
+  const d = dims[key]
+  if (!d || !d.w || !d.h) return
+  const sw = stage.clientWidth
+  const sh = stage.clientHeight
+  if (!sw || !sh) return
+  const dispH = (d.h / d.w) * sw
+  const s = Math.min(1, sh / dispH)
+  const fit = { scale: s, x: (sw - sw * s) / 2, y: (sh - dispH * s) / 2 }
+  fits[key] = fit
+  transforms[key] = { ...fit }
+}
+function wrapStyle(key: string) {
+  const t = transforms[key]
+  return t ? { transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})` } : {}
+}
+
+/** 拖动中的临时状态（非响应式，仅记录起点） */
+let drag: { key: string; sx: number; sy: number; ox: number; oy: number } | null = null
+const dragging = ref(false)
+
+function togglePan(key: string) {
+  panMode[key] = !panMode[key]
+  // 退出抓手模式时清掉可能残留的拖动
+  if (!panMode[key]) {
+    drag = null
+    dragging.value = false
+  }
+}
+
+/** 滚轮缩放（拖动中也可用）：以光标位置为锚点缩放，保持光标下的图像点不动 */
+function onWheel(img: CadImage, e: WheelEvent) {
+  // 先拦截：无论是否已到缩放上下限，都不让滚轮冒泡影响外层滚动条
+  e.preventDefault()
+  const stage = e.currentTarget as HTMLElement
+  const rect = stage.getBoundingClientRect()
+  const cx = e.clientX - rect.left
+  const cy = e.clientY - rect.top
+  const t = tf(img.key)
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
+  const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, t.scale * factor))
+  if (next === t.scale) return
+  const k = next / t.scale
+  t.x = cx - k * (cx - t.x)
+  t.y = cy - k * (cy - t.y)
+  t.scale = next
+}
+
+/** 抓手模式：按下开始平移 */
+function onStageMouseDown(img: CadImage, e: MouseEvent) {
+  if (!panMode[img.key]) return
+  const t = tf(img.key)
+  drag = { key: img.key, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y }
+  dragging.value = true
+  e.preventDefault()
+}
+function onWindowMouseMove(e: MouseEvent) {
+  if (!drag) return
+  const t = tf(drag.key)
+  t.x = drag.ox + (e.clientX - drag.sx)
+  t.y = drag.oy + (e.clientY - drag.sy)
+}
+function onWindowMouseUp() {
+  drag = null
+  dragging.value = false
+}
+
+/** 双击复位到默认适配态（整张图全显） */
+function resetTransform(img: CadImage) {
+  const f = fits[img.key]
+  transforms[img.key] = f ? { ...f } : { scale: 1, x: 0, y: 0 }
+}
+
+/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；否则→默认（不显放大镜） */
+function cursorFor(key: string): string {
+  if (!panMode[key]) return 'default'
+  return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
+}
 
 /** 当前选中图片 */
 const currentImage = computed<CadImage | null>(() => images.value[selectedIndex.value] ?? null)
@@ -129,24 +235,38 @@ function pointsAttr(box: CadBox): string {
     .join(' ')
 }
 
-/** 图片加载完成：记录真实像素尺寸 */
+/** 图片加载完成：记录真实像素尺寸，并应用整张可见的默认适配 */
 function onImgLoad(key: string, e: Event) {
   const img = e.target as HTMLImageElement
   dims[key] = { w: img.naturalWidth, h: img.naturalHeight }
+  const stage = img.closest('.img-stage') as HTMLElement | null
+  if (stage) applyFit(key, stage)
 }
 
-/** 鼠标在图上移动：换算出光标处的图片真实像素坐标（按显示尺寸↔自然尺寸比例） */
-function onImgMove(img: CadImage, e: MouseEvent) {
-  const el = e.currentTarget as HTMLImageElement
-  const rect = el.getBoundingClientRect()
-  const offX = e.clientX - rect.left
-  const offY = e.clientY - rect.top
+/**
+ * 光标在视口内移动（含图片以外的灰色区域）：换算出光标处的图片真实像素坐标。
+ * 超出图片时 offX/offY 为负或大于图像尺寸，natX/natY 相应为负值/越界值。
+ */
+function onStageMove(img: CadImage, e: MouseEvent) {
+  const stage = e.currentTarget as HTMLElement
+  const stageRect = stage.getBoundingClientRect()
+  const imgEl = stage.querySelector('.img-el') as HTMLImageElement | null
   const d = dims[img.key]
+  const cx = e.clientX - stageRect.left
+  const cy = e.clientY - stageRect.top
   hover.key = img.key
-  hover.left = offX
-  hover.top = offY
-  hover.natX = d && rect.width ? Math.round((offX / rect.width) * d.w) : 0
-  hover.natY = d && rect.height ? Math.round((offY / rect.height) * d.h) : 0
+  hover.left = cx
+  hover.top = cy
+  if (imgEl && d) {
+    const r = imgEl.getBoundingClientRect()
+    const offX = e.clientX - r.left
+    const offY = e.clientY - r.top
+    hover.natX = r.width ? Math.round((offX / r.width) * d.w) : 0
+    hover.natY = r.height ? Math.round((offY / r.height) * d.h) : 0
+  } else {
+    hover.natX = 0
+    hover.natY = 0
+  }
   hover.show = true
 }
 
@@ -172,6 +292,14 @@ async function load() {
   ann.value = null
   selectedIndex.value = 0
   loadError.value = ''
+  // 换图时清空上一份的缩放/平移/抓手态与尺寸缓存
+  for (const k of Object.keys(transforms)) delete transforms[k]
+  for (const k of Object.keys(fits)) delete fits[k]
+  for (const k of Object.keys(panMode)) delete panMode[k]
+  for (const k of Object.keys(dims)) delete dims[k]
+  drag = null
+  dragging.value = false
+  hover.show = false
   const path = cadPath.value
   if (!path) {
     loadError.value = '路径不合法，应为 /cad/<桶>/<任务目录>/annotations/<任务编号>/annotations.json'
@@ -242,7 +370,15 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener('mousemove', onWindowMouseMove)
+  window.addEventListener('mouseup', onWindowMouseUp)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('mousemove', onWindowMouseMove)
+  window.removeEventListener('mouseup', onWindowMouseUp)
+})
 watch(rawKey, load)
 </script>
 
@@ -270,58 +406,61 @@ watch(rawKey, load)
         >
           <div class="img-card-head">
             <span class="img-path">{{ img.displayPath }}</span>
-            <el-button size="small" round>✋ 抓手</el-button>
+            <el-button
+              size="small"
+              round
+              :type="panMode[img.key] ? 'primary' : 'default'"
+              @click.stop="togglePan(img.key)"
+            >
+              {{ panMode[img.key] ? '👉 拖动中' : '✋ 抓手' }}
+            </el-button>
           </div>
-          <div class="img-stage">
-            <div class="img-wrap">
-              <img
-                :src="cadObjectUrl(img.key)"
-                :alt="img.name"
-                class="img-el"
-                @load="onImgLoad(img.key, $event)"
-                @mousemove="onImgMove(img, $event)"
-                @mouseleave="onImgLeave"
-              />
-              <svg
-                v-if="dims[img.key]"
-                class="img-overlay"
-                :viewBox="`0 0 ${dims[img.key].w} ${dims[img.key].h}`"
-                preserveAspectRatio="none"
-              >
-                <g v-for="(box, bi) in img.boxes" :key="bi">
-                  <polygon
-                    :points="pointsAttr(box)"
-                    fill="none"
-                    :stroke="boxColor(bi)"
-                    :stroke-width="activeBox === box ? 3 : 1.5"
-                    :opacity="activeBox && activeBox !== box ? 0.45 : 1"
-                  />
-                </g>
-                <!-- 十字辅助线（悬停时）：用自然像素坐标，non-scaling-stroke 保证线宽不受拉伸影响 -->
-                <g v-if="hover.show && hover.key === img.key && dims[img.key]">
-                  <line
-                    :x1="hover.natX"
-                    y1="0"
-                    :x2="hover.natX"
-                    :y2="dims[img.key].h"
-                    stroke="#9ca3af"
-                    stroke-dasharray="6 6"
-                    vector-effect="non-scaling-stroke"
-                  />
-                  <line
-                    x1="0"
-                    :y1="hover.natY"
-                    :x2="dims[img.key].w"
-                    :y2="hover.natY"
-                    stroke="#9ca3af"
-                    stroke-dasharray="6 6"
-                    vector-effect="non-scaling-stroke"
-                  />
-                </g>
-              </svg>
-              <!-- 跟随光标的坐标标签（HTML，不受 SVG 拉伸影响） -->
+          <div class="img-card-body">
+            <div
+              class="img-stage"
+              :style="{ cursor: cursorFor(img.key) }"
+              @wheel="onWheel(img, $event)"
+              @mousedown="onStageMouseDown(img, $event)"
+              @dblclick="resetTransform(img)"
+              @mousemove="onStageMove(img, $event)"
+              @mouseleave="onImgLeave"
+            >
+              <div class="img-wrap" :style="wrapStyle(img.key)">
+                <img
+                  :src="cadObjectUrl(img.key)"
+                  :alt="img.name"
+                  class="img-el"
+                  draggable="false"
+                  @load="onImgLoad(img.key, $event)"
+                />
+                <svg
+                  v-if="dims[img.key]"
+                  class="img-overlay"
+                  :viewBox="`0 0 ${dims[img.key].w} ${dims[img.key].h}`"
+                  preserveAspectRatio="none"
+                >
+                  <g v-for="(box, bi) in img.boxes" :key="bi">
+                    <polygon
+                      :points="pointsAttr(box)"
+                      fill="none"
+                      :stroke="boxColor(bi)"
+                      :stroke-width="activeBox === box ? 3 : 1.5"
+                      :opacity="activeBox && activeBox !== box ? 0.45 : 1"
+                    />
+                  </g>
+                </svg>
+              </div>
+              <!-- 十字辅助线：铺满整个视口（含图片外），随光标定位 -->
               <div
-                v-if="hover.show && hover.key === img.key"
+                v-if="hover.show && hover.key === img.key && !dragging"
+                class="crosshair"
+              >
+                <div class="crosshair-v" :style="{ left: hover.left + 'px' }"></div>
+                <div class="crosshair-h" :style="{ top: hover.top + 'px' }"></div>
+              </div>
+              <!-- 跟随光标的坐标标签：置于未变换的视口内，不随图片缩放/平移漂移 -->
+              <div
+                v-if="hover.show && hover.key === img.key && !dragging"
                 class="coord-label"
                 :style="{ left: hover.left + 'px', top: hover.top + 'px' }"
               >
@@ -466,21 +605,33 @@ watch(rawKey, load)
   white-space: nowrap;
 }
 
-.img-stage {
-  position: relative;
+.img-card-body {
   padding: 12px;
-  background: #fafafa;
+  background: #e8eaed;
 }
 
-/* 包裹 img 与其叠加层/标签，尺寸与 img 完全一致，便于绝对定位对齐 */
+/* 视口：缩放/平移在此框内裁剪，固定高度使“拖动”有意义；背景置灰与白底图纸区分 */
+.img-stage {
+  position: relative;
+  overflow: hidden;
+  height: 62vh;
+  min-height: 320px;
+  background: #e8eaed;
+}
+
+/* 包裹 img 与叠加层，受 translate+scale 变换；以左上角为缩放/平移基准 */
 .img-wrap {
   position: relative;
+  width: 100%;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .img-el {
   display: block;
   width: 100%;
   height: auto;
+  user-select: none;
 }
 
 .img-overlay {
@@ -502,6 +653,31 @@ watch(rawKey, load)
   white-space: nowrap;
   pointer-events: none;
   text-shadow: 0 0 2px #fff, 0 0 2px #fff;
+}
+
+/* 十字辅助线：铺满整个视口，虚线，不拦截鼠标 */
+.crosshair {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.crosshair-v {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #b0b3b8;
+}
+
+.crosshair-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed #b0b3b8;
 }
 
 /* 右：标注列表 */
