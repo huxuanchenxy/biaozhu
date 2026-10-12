@@ -27,6 +27,10 @@ export interface CadFormField {
 
 /** 单个标注框：矩形/视图分割框用 x/y/width/height/rotation；多边形用 points */
 export interface CadBox {
+  /** 前端标注类型：'rect' | 'polygon'（缺省时按 points 是否有值判断） */
+  type?: string
+  /** 所属工具栏（splitedAnnotation / splitedAnnotationPolygon / pictutreAnnotation） */
+  toolbarKey?: string
   x?: number
   y?: number
   width?: number
@@ -194,9 +198,77 @@ export function polygonCorners(box: CadBox): CadCorner[] {
   const pts = box.points || []
   const out: CadCorner[] = []
   for (let i = 0; i + 1 < pts.length; i += 2) {
-    out.push({ x: Number(pts[i]) || 0, y: Number(pts[i + 1]) || 0 })
+    const x = Number(pts[i])
+    const y = Number(pts[i + 1])
+    if (Number.isFinite(x) && Number.isFinite(y)) out.push({ x, y })
   }
   return out
+}
+
+/**
+ * 是否为多边形标注。
+ * 实测多边形框同时带有 x/y/width/height（其外接矩形）与 points，
+ * 因此以 points（≥3 个顶点）或 type==='polygon' / toolbarKey 为准，优先 points。
+ */
+export function isPolygonBox(box: CadBox): boolean {
+  if (polygonCorners(box).length >= 3) return true
+  return box.type === 'polygon' || box.toolbarKey === 'splitedAnnotationPolygon'
+}
+
+/** 统一取标注的角点：多边形取顶点列表，矩形按 rotation 展开四角 */
+export function boxCorners(box: CadBox): CadCorner[] {
+  return isPolygonBox(box) ? polygonCorners(box) : rectCorners(box)
+}
+
+/** 标注顶点数（多边形=顶点个数，矩形=4） */
+export function boxVertexCount(box: CadBox): number {
+  return boxCorners(box).length
+}
+
+/**
+ * 标注中心点（多边形取顶点面积形心，退化时取外接矩形中心；矩形取几何中心）。
+ * 用于在叠加层里放置标签文字。
+ */
+export function boxCenter(box: CadBox): CadCorner {
+  const pts = boxCorners(box)
+  if (!pts.length) return { x: 0, y: 0 }
+  let area = 0
+  let cx = 0
+  let cy = 0
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i]
+    const b = pts[(i + 1) % pts.length]
+    const cross = a.x * b.y - b.x * a.y
+    area += cross
+    cx += (a.x + b.x) * cross
+    cy += (a.y + b.y) * cross
+  }
+  area /= 2
+  if (Math.abs(area) > 1e-6) return { x: cx / (6 * area), y: cy / (6 * area) }
+  // 共线/自交退化：用外接矩形中心
+  const xs = pts.map((p) => p.x)
+  const ys = pts.map((p) => p.y)
+  return {
+    x: (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: (Math.min(...ys) + Math.max(...ys)) / 2,
+  }
+}
+
+/** 多边形外接尺寸（像素），用于在信息栏里给出区域大小 */
+export function boxExtent(box: CadBox): { w: number; h: number } | null {
+  const pts = boxCorners(box)
+  if (pts.length < 2) return null
+  const xs = pts.map((p) => p.x)
+  const ys = pts.map((p) => p.y)
+  return {
+    w: Math.max(...xs) - Math.min(...xs),
+    h: Math.max(...ys) - Math.min(...ys),
+  }
+}
+
+/** 标注类别中文名：多边形/矩形（用于命名前缀与徽标） */
+export function boxShapeLabel(box: CadBox): string {
+  return isPolygonBox(box) ? '多边形' : '矩形'
 }
 
 /**
@@ -207,10 +279,22 @@ const TYPE_LABEL: Record<string, string> = {
   'general-linear-dimension': '线性尺寸',
   'linear-dimension-tolerance': '线性尺寸公差',
   'diameter-dimension': '直径尺寸',
+  'diameter-tolerance': '直径公差',
   'radius-dimension': '半径尺寸',
   'angular-dimension': '角度尺寸',
   'chamfer-dimension': '倒角尺寸',
   'technical-requirements-block': '技术要求',
+  'view-section-identification': '视图剖切标识',
+  'welding-symbol': '焊接符号',
+  'datum-symbol': '基准符号',
+  // 剖面线 / 填充区域（多边形标注常见类型）
+  'single-direction-diagonal-hatch-area': '单向斜线剖面区',
+  'double-direction-diagonal-hatch-area': '双向斜线剖面区',
+  'cross-hatch-area': '交叉剖面区',
+  'dot-fill-texture-area': '点状填充区',
+  'honeycomb-fill-texture-area': '蜂窝填充区',
+  'line-fill-texture-area': '线条填充区',
+  'gradient-fill-texture-area': '渐变填充区',
   // 常见 GD&T（几何公差）代码，部分图纸会用到；未命中则回退原代码
   straightness: '直线度',
   flatness: '平面度',
@@ -239,6 +323,39 @@ function normalizeFormFields(content: CadBox['content']): CadFormField[] {
   if (!content) return []
   if (Array.isArray(content)) return content
   return Object.values(content)
+}
+
+/** 表单字段标识 → 中文标签（数据自带 name 时优先用 name） */
+const FIELD_LABEL: Record<string, string> = {
+  type: '类型',
+  value: '数值',
+  'upper-deviation': '上公差',
+  'lower-deviation': '下公差',
+  datum: '基准',
+  'thread-designation': '螺纹代号',
+  'tolerance-grade': '公差等级',
+}
+
+/**
+ * 把标注的属性表单展开为「中文标签 + 值」列表（只保留有值的项）。
+ * 矩形常见类型/数值/上下公差/基准等；多边形通常只有类型。
+ */
+export function boxFormEntries(box: CadBox): Array<{ label: string; value: string }> {
+  const content = box.content
+  if (!content) return []
+  const raw: Array<[string, CadFormField | undefined]> = Array.isArray(content)
+    ? content.map((f, i) => [String(f?.key ?? f?.name ?? i), f] as [string, CadFormField | undefined])
+    : Object.entries(content)
+  const out: Array<{ label: string; value: string }> = []
+  for (const [k, f] of raw) {
+    const v = f?.value
+    const text =
+      v == null ? '' : typeof v === 'number' ? String(v) : typeof v === 'string' ? v.trim() : ''
+    if (!text) continue
+    const label = f?.name || FIELD_LABEL[k] || k
+    out.push({ label, value: k === 'type' ? typeLabel(text) : text })
+  }
+  return out
 }
 
 /**
