@@ -45,6 +45,12 @@ export default defineConfig(({ mode }) => {
       open: false,
       // 开发环境接口代理：前端 /api -> 后端真实地址
       proxy: {
+        // CAD 标注页列目录接口：开发把 /cad-api 转发到本地签名服务 server.mjs（同 MinIO 那一跳）
+        '/cad-api': {
+          target: env.VITE_MINIO_SIGNER || 'http://127.0.0.1:3345',
+          changeOrigin: true,
+          secure: false,
+        },
         [env.VITE_APP_BASE_API || '/api']: {
           target: env.VITE_PROXY_TARGET,
           changeOrigin: true,

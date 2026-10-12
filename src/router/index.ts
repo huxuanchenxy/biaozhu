@@ -42,6 +42,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Markdown 标注', hideNav: true },
   },
   {
+    /**
+     * CAD 图纸标注页：/cad/<object key>
+     * :key(.*) 通配剩余全部路径（含 '/'、中文、空格等），key 即桶内对象路径，
+     * 约定结尾为 <任务目录>/annotations/<任务编号>/annotations.json。
+     * 例：#/cad/drivdernet_abc/国拨/.../annotations/1934653195106424210/annotations.json
+     */
+    path: '/cad/:key(.*)',
+    name: 'CadAnnotator',
+    component: () => import('@/views/CadAnnotatorView.vue'),
+    meta: { title: 'CAD 标注', hideNav: true },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/views/NotFoundView.vue'),

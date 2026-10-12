@@ -113,13 +113,21 @@ function strictEncodePath(p) {
     })
     .join('/')
 }
+/** 把 query 参数编成 SigV4 canonical query string（按字典序，RFC3986 严格编码） */
+function canonicalQueryOf(params) {
+  return [...params.entries()]
+    .map(([k, v]) => [strictEncodeComponent(k), strictEncodeComponent(v)])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&')
+}
 /** 计算 SigV4 Authorization 头 */
-function buildAuth({ host, pathname, now }) {
+function buildAuth({ host, pathname, canonicalQuery, now }) {
   const amzDate = amzDateOf(now)
   const dateStamp = amzDate.slice(0, 8)
   const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${EMPTY_SHA256}\nx-amz-date:${amzDate}\n`
   const signedHeaders = 'host;x-amz-content-sha256;x-amz-date'
-  const canonicalRequest = ['GET', pathname, '', canonicalHeaders, signedHeaders, EMPTY_SHA256].join('\n')
+  const canonicalRequest = ['GET', pathname, canonicalQuery, canonicalHeaders, signedHeaders, EMPTY_SHA256].join('\n')
   const scope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`
   const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256hex(canonicalRequest)].join('\n')
   const kDate = hmac(`AWS4${MINIO_SECRET_KEY}`, dateStamp)
@@ -132,19 +140,24 @@ function buildAuth({ host, pathname, now }) {
     amzDate,
   }
 }
-/** 以服务端时钟（+offsetMs 校正）签名并直接向 MinIO 发起 GET，返回上游响应 */
-function signedGet(pathname, offsetMs) {
+/** 以服务端时钟（+offsetMs 校正）签名并向 MinIO 发起 GET，返回上游响应 */
+function signedGet(pathname, offsetMs, query = '') {
   return new Promise((resolve, reject) => {
     const target = new URL(MINIO_ENDPOINT)
     const host = target.host
-    const { authorization, amzDate } = buildAuth({ host, pathname, now: new Date(Date.now() + offsetMs) })
+    const { authorization, amzDate } = buildAuth({
+      host,
+      pathname,
+      canonicalQuery: query.startsWith('?') ? query.slice(1) : query,
+      now: new Date(Date.now() + offsetMs),
+    })
     const req = http.request(
       {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || (target.protocol === 'https:' ? 443 : 80),
         method: 'GET',
-        path: pathname,
+        path: query ? `${pathname}${query}` : pathname,
         headers: {
           host,
           'x-amz-date': amzDate,
@@ -213,6 +226,77 @@ async function proxyToMinio(req, res) {
   pipeUpstream(upstream, res)
 }
 
+/* ---------------- CAD 标注：列目录接口 ---------------- */
+/** 单段路径的严格编码（与 strictEncodePath 同规则，供签名与请求 URL 共用） */
+function strictEncodeComponent(seg) {
+  return encodeURIComponent(seg).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+}
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj)
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+  })
+  res.end(body)
+}
+/** 从 ListObjectsV2 的 XML 响应里抽 <Key>（encoding-type=url 时需 decode）、判截断、取续传 token */
+function parseListXml(xml) {
+  const keys = []
+  for (const m of xml.matchAll(/<Key>([^<]*)<\/Key>/g)) {
+    let k = m[1]
+    try {
+      k = decodeURIComponent(k)
+    } catch {
+      /* 保持原样 */
+    }
+    keys.push(k)
+  }
+  const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml)
+  const token = xml.match(/<NextContinuationToken>([^<]*)<\/NextContinuationToken>/)?.[1] || ''
+  return { keys, truncated, token }
+}
+/** GET /cad-api/list?prefix=<桶内前缀>：签名调 ListObjectsV2 并自动翻页，返回 { objects } */
+async function handleList(req, res, url) {
+  let prefix = url.searchParams.get('prefix') || ''
+  // ListObjectsV2 的 prefix 相对桶内根，需去掉前端传来的桶名前缀段（<bucket>/）
+  if (prefix === BUCKET) prefix = ''
+  else if (prefix.startsWith(`${BUCKET}/`)) prefix = prefix.slice(BUCKET.length + 1)
+  if (!MINIO_ACCESS_KEY || !MINIO_SECRET_KEY) {
+    sendJson(res, 500, { error: 'server.mjs 未配置 MinIO 密钥（MINIO_ACCESS_KEY / MINIO_SECRET_KEY）' })
+    return
+  }
+  const pathname = strictEncodePath(`/${BUCKET}`)
+  const objects = []
+  let token = ''
+  for (let page = 0; page < 20; page += 1) {
+    const params = new URLSearchParams({
+      'list-type': '2',
+      'encoding-type': 'url',
+      'max-keys': '1000',
+      prefix,
+    })
+    if (token) params.set('continuation-token', token)
+    const query = `?${canonicalQueryOf(params)}`
+    let upstream
+    try {
+      upstream = await signedGet(pathname, 0, query)
+    } catch (e) {
+      sendJson(res, 502, { error: `MinIO 连接失败：${e.message}` })
+      return
+    }
+    const body = (await readBody(upstream)).toString('utf8')
+    if (upstream.statusCode !== 200) {
+      sendJson(res, 502, { error: `列目录失败 HTTP ${upstream.statusCode}`, detail: body.slice(0, 800) })
+      return
+    }
+    const parsed = parseListXml(body)
+    objects.push(...parsed.keys)
+    if (!parsed.truncated || !parsed.token) break
+    token = parsed.token
+  }
+  sendJson(res, 200, { objects })
+}
+
 /** 普通反向代理：把 /api/... 透传到后端（保存 json 的 uploadOverwrite 走这里），不改路径 */
 function proxyToApi(req, res) {
   const target = new URL(API_TARGET)
@@ -271,6 +355,13 @@ function sendStatic(res, urlPath) {
 
 const server = http.createServer((req, res) => {
   const urlPath = (req.url || '/').split('?')[0]
+  // CAD 标注页的列目录接口（服务端签名，前端不接触密钥）
+  if (urlPath === '/cad-api/list' && req.method === 'GET') {
+    handleList(req, res, new URL(req.url, 'http://localhost')).catch((e) =>
+      sendJson(res, 500, { error: `列目录失败：${e.message}` }),
+    )
+    return
+  }
   // 后端接口（保存 json 等）：普通反代，不签名
   if (urlPath === '/api' || urlPath.startsWith('/api/')) {
     proxyToApi(req, res)
@@ -297,5 +388,6 @@ server.listen(PORT, () => {
   console.log(`[server] 静态目录: ${DIST}`)
   console.log(`[server] 监听端口: ${PORT}`)
   console.log(`[server] 代理 /${BUCKET}/* -> ${MINIO_ENDPOINT}（服务端 SigV4 签名，时钟自动校正）`)
+  console.log(`[server] 列目录 /cad-api/list?prefix=... -> ${MINIO_ENDPOINT}（ListObjectsV2）`)
   console.log(`[server] 代理 /api/* -> ${API_TARGET}（普通反代，保存 json）`)
 })
