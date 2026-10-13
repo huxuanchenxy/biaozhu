@@ -219,12 +219,10 @@ const allRows = computed(() => {
     index: number
     color: string
     name: string
-    type: string
-    value: string
     imageName: string
     isPolygon: boolean
-    /** 属性表单里除类型/数值外的其余有值字段 */
-    extras: Array<{ label: string; value: string }>
+    /** 属性表单里全部有值字段（含类型/数值），空值字段不展示；数值项带 isValue 供高亮 */
+    fields: Array<{ label: string; value: string; isValue: boolean }>
     /** 顶点数 */
     vertices: number
     /** 区域外接尺寸文本（主要给多边形用） */
@@ -232,21 +230,28 @@ const allRows = computed(() => {
   }> = []
   images.value.forEach((img, imageIndex) => {
     img.boxes.forEach((box, i) => {
-      const { type, value } = boxTypeAndValue(box)
       const isPolygon = isPolygonBox(box)
       const entries = boxFormEntries(box)
       const ext = boxExtent(box)
+      // 动态字段：接口 content 里有哪些键就展示哪些，值为空的键值对整体不显示；
+      // 固定「类型」在前、「数值」其次，其余按 content 原始顺序
+      const fields: Array<{ label: string; value: string; isValue: boolean }> = []
+      const typeEntry = entries.find((e) => e.label === '类型')
+      if (typeEntry) fields.push({ ...typeEntry, isValue: false })
+      const valueEntry = entries.find((e) => e.label === '数值')
+      if (valueEntry) fields.push({ ...valueEntry, isValue: true })
+      for (const e of entries) {
+        if (e.label !== '类型' && e.label !== '数值') fields.push({ ...e, isValue: false })
+      }
       rows.push({
         box,
         imageIndex,
         index: i,
         color: boxColor(i),
         name: boxDisplayName(box, boxShapeLabel(box), i + 1),
-        type,
-        value,
         imageName: img.name,
         isPolygon,
-        extras: entries.filter((e) => e.label !== '类型' && e.label !== '数值'),
+        fields,
         vertices: boxVertexCount(box),
         extent: ext ? `${Math.round(ext.w)}×${Math.round(ext.h)} px` : '',
       })
@@ -731,15 +736,18 @@ watch(rawKey, load)
                 <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
                   {{ row.isPolygon ? '多边形' : '矩形' }}
                 </span> -->
-                <span class="ann-field">类型: {{ row.type || '—' }}</span>
+                <span class="ann-field">{{ row.fields[0] ? `${row.fields[0].label}: ${row.fields[0].value}` : row.name }}</span>
               </div>
-              <div class="ann-line ann-line--sub">
-                <span class="ann-field ann-value">数值: {{ row.value || '—' }}</span>
+              <div v-if="row.fields.length > 1 || row.isPolygon" class="ann-line ann-line--sub">
+                <span
+                  v-for="f in row.fields.slice(1)"
+                  :key="f.label"
+                  :class="['ann-field', { 'ann-value': f.isValue }]"
+                >
+                  {{ f.label }}: {{ f.value }}
+                </span>
                 <span v-if="row.isPolygon" class="ann-field">顶点: {{ row.vertices }}</span>
                 <span v-if="row.isPolygon && row.extent" class="ann-field">外接: {{ row.extent }}</span>
-                <span v-for="ex in row.extras" :key="ex.label" class="ann-field">
-                  {{ ex.label }}: {{ ex.value }}
-                </span>
               </div>
             </li>
           </template>
