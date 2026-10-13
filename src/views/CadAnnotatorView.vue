@@ -550,7 +550,7 @@ watch(rawKey, load)
         <span v-if="loading" class="hint">加载中…</span>
         <span v-else class="hint">{{ images.length }} 张切图</span>
       </header>
-      <div class="cad-path">{{ currentImage?.displayPath || (cadPath?.imagesPrefix ?? '') }}</div>
+      <div class="cad-path">当前图片：{{ currentImage?.displayPath || (cadPath?.imagesPrefix ?? '') }}</div>
 
       <!-- 叠加层工具条：形状筛选 + 绘制开关 -->
       <div class="cad-toolbar">
@@ -692,7 +692,7 @@ watch(rawKey, load)
     <section class="pane pane-right">
       <header class="pane-head">
         <span class="pane-title">标注信息</span>
-        <span class="hint">{{ visibleRows.length }} / {{ allRows.length }} 项</span>
+        <span class="hint"> {{ allRows.length }} 项</span>
       </header>
 
       <div class="pane-body ann-list">
