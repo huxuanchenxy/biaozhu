@@ -13,6 +13,7 @@
  */
 
 import { fullObjectPath, normalizeObjectKey } from './minio'
+import { uploadOverwriteObject } from '@/api'
 
 /** annotations.json 里的一个表单控件（content 数组元素），字段按渲染需要宽松取用 */
 export interface CadFormField {
@@ -318,39 +319,56 @@ export function boxAtPoint(boxes: CadBox[], x: number, y: number): CadBox | null
 }
 
 /**
- * 类型代码 → 中文标签。实测精剪的类型值为英文代码（如 general-linear-dimension）。
- * 未收录的代码回退显示原始代码（GD&T 类代码若本就不在此表，会在界面上直接显代码）。
+ * 权威「类型」清单：与标注工具的「类型」单选项一致，顺序照搬其面板。
+ * 数据里 content.type.value 存的是英文代码，这里 code→中文名。
+ * 注：前 21 项为尺寸/公差/符号类，后 15 项为 GD&T（几何公差）。
+ *     其中螺纹/粗糙度/焊接编号/探伤/气泡/接管等代码在现有样本里未出现过，
+ *     按现有命名习惯拟定；若原图数据用了不同代码串，回显会退回原代码，需据实修正。
  */
-const TYPE_LABEL: Record<string, string> = {
-  'general-linear-dimension': '线性尺寸',
-  'linear-dimension-tolerance': '线性尺寸公差',
-  'diameter-dimension': '直径尺寸',
-  'diameter-tolerance': '直径公差',
-  'radius-dimension': '半径尺寸',
-  'radius-tolerance': '半径公差',
-  'angular-dimension': '角度尺寸',
-  'angular-tolerance': '角度公差',
-  'chamfer-dimension': '倒角尺寸',
-  'chamfer-tolerance': '倒角公差',
-  'ordinate-dimension': '坐标尺寸',
-  'basic-dimension': '基本尺寸',
-  'reference-dimension': '参考尺寸',
-  'spherical-dimension': '球径尺寸',
-  'arc-dimension': '弧长尺寸',
-  'technical-requirements-block': '技术要求',
-  'view-section-identification': '视图剖切标识',
-  'section-symbol': '剖切符号',
-  'detail-view-symbol': '局部放大标识',
-  'welding-symbol': '焊接符号',
-  'thread-symbol': '螺纹符号',
-  'surface-finish-symbol': '表面粗糙度',
-  'part-number-balloon': '零件序号',
-  'projection-symbol': '投影符号',
-  'break-line-symbol': '断开线',
-  'datum-symbol': '基准符号',
-  'datum-target': '基准目标',
-  'datum-reference-frame': '基准参考框',
-  // 剖面线 / 填充区域（多边形标注常见类型）
+const TYPE_OPTIONS: Array<{ code: string; label: string }> = [
+  { code: 'general-linear-dimension', label: '普通线性尺寸' },
+  { code: 'linear-dimension-tolerance', label: '线性尺寸公差' },
+  { code: 'radius-dimension', label: '半径尺寸' },
+  { code: 'radius-tolerance', label: '半径尺寸公差' },
+  { code: 'diameter-dimension', label: '直径尺寸' },
+  { code: 'diameter-tolerance', label: '直径尺寸纯公差' },
+  { code: 'angular-dimension', label: '角度尺寸' },
+  { code: 'angular-tolerance', label: '角度公差' },
+  { code: 'chamfer-dimension', label: '倒角尺寸' },
+  { code: 'chamfer-tolerance', label: '倒角尺寸公差' },
+  { code: 'thread-spec', label: '螺纹规格标注' },
+  { code: 'thread-tolerance-param', label: '螺纹规格公差及参数' },
+  { code: 'surface-finish-symbol', label: '表面粗糙度符号及参数' },
+  { code: 'welding-symbol', label: '焊接符号本体' },
+  { code: 'datum-symbol', label: '基准代号/基准符号' },
+  { code: 'datum-target', label: '基准目标' },
+  { code: 'weld-part-number', label: '焊接/部位编号' },
+  { code: 'weld-inspection-ndt', label: '焊接检验/探伤说明' },
+  { code: 'view-section-identification', label: '视图/剖视标识' },
+  { code: 'balloon-number', label: '圆圈/气泡编号' },
+  { code: 'technical-requirements-block', label: '技术要求/说明块' },
+  { code: 'straightness', label: '直线度' },
+  { code: 'flatness', label: '平面度' },
+  { code: 'circularity', label: '圆度' },
+  { code: 'cylindricity', label: '圆柱度' },
+  { code: 'parallelism', label: '平行度' },
+  { code: 'perpendicularity', label: '垂直度' },
+  { code: 'angularity', label: '倾斜度' },
+  { code: 'position', label: '位置度' },
+  { code: 'concentricity', label: '同轴度/同心度' },
+  { code: 'symmetry', label: '对称度' },
+  { code: 'circular-runout', label: '圆跳动' },
+  { code: 'total-runout', label: '全跳动' },
+  { code: 'profile-of-a-line', label: '线轮廓度' },
+  { code: 'profile-of-a-surface', label: '面轮廓度' },
+  { code: 'nozzle', label: '接管' },
+]
+
+/**
+ * 仅用于回显的补充类型：多边形剖面线/填充区等（不在「类型」单选面板内，
+ * 但历史数据里会出现），以及旧代码 runout。保证这些值不会在界面上退成英文代码。
+ */
+const TYPE_LABEL_EXTRA: Record<string, string> = {
   'single-direction-diagonal-hatch-area': '单向斜线剖面区',
   'double-direction-diagonal-hatch-area': '双向斜线剖面区',
   'cross-hatch-area': '交叉剖面区',
@@ -358,28 +376,32 @@ const TYPE_LABEL: Record<string, string> = {
   'honeycomb-fill-texture-area': '蜂窝填充区',
   'line-fill-texture-area': '线条填充区',
   'gradient-fill-texture-area': '渐变填充区',
-  // 常见 GD&T（几何公差）代码，部分图纸会用到；未命中则回退原代码
-  straightness: '直线度',
-  flatness: '平面度',
-  circularity: '圆度',
-  cylindricity: '圆柱度',
-  'profile-of-a-line': '线轮廓度',
-  'profile-of-a-surface': '面轮廓度',
-  symmetry: '对称度',
   runout: '跳动',
-  'circular-runout': '圆跳动',
-  'total-runout': '全跳动',
-  'parallelism': '平行度',
-  perpendicularity: '垂直度',
-  angularity: '倾斜度',
-  'position': '位置度',
-  'concentricity': '同心度',
+}
+
+/** 类型代码 → 中文标签（权威清单 + 回显补充）；未命中回退原代码 */
+const TYPE_LABEL: Record<string, string> = {
+  ...Object.fromEntries(TYPE_OPTIONS.map((o) => [o.code, o.label])),
+  ...TYPE_LABEL_EXTRA,
 }
 
 /** 把类型代码转成中文标签；未知代码原样返回 */
 export function typeLabel(code: string): string {
   if (!code) return ''
   return TYPE_LABEL[code] || code
+}
+
+/** 编辑弹框「类型」单选框的可选项：即权威清单，顺序与标注工具一致 */
+export const CAD_TYPE_OPTIONS: Array<{ code: string; label: string }> = TYPE_OPTIONS.map((o) => ({
+  ...o,
+}))
+
+/**
+ * 写回 annotations.json（覆盖 MinIO 上的原对象）。
+ * 编辑/删除后把内存里的整份 CadAnnotations 原样序列化上传。
+ */
+export async function saveCadAnnotations(annotationsKey: string, data: CadAnnotations): Promise<void> {
+  await uploadOverwriteObject(fullObjectPath(annotationsKey), data)
 }
 
 /** 把 content 归一为「字段数组」（兼容对象映射与数组两种导出形式） */

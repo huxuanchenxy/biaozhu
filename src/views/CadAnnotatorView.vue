@@ -1,28 +1,29 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   baseName,
   boxAtPoint,
   boxCorners,
-  boxCenter,
   boxDisplayName,
   boxExtent,
   boxFormEntries,
   boxShapeLabel,
-  boxTypeAndValue,
   boxVertexCount,
   cadObjectUrl,
+  CAD_TYPE_OPTIONS,
   fetchCadAnnotations,
   imageIndexOfBox,
   isPolygonBox,
   listCadObjects,
   parseCadPath,
+  saveCadAnnotations,
   splitedImageName,
   type CadAnnotations,
   type CadBox,
   type CadCorner,
+  type CadFormMap,
   type CadPath,
 } from '@/utils/cad'
 
@@ -188,9 +189,6 @@ function unit(key: string): number {
 function vertexRadius(key: string): number {
   return 5 * unit(key)
 }
-function labelFont(key: string): number {
-  return 22 * unit(key)
-}
 
 /** 框配色：与截图一致的绿色系为主，多类型时循环取色 */
 const PALETTE = ['#22c55e', '#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#eab308']
@@ -307,6 +305,130 @@ function toggleActiveBox(box: CadBox) {
   if (activeBox.value) scrollToRow(activeBox.value)
 }
 
+/* ------------------------------------------------------------------
+ * 标注信息：修改 / 删除（写回 MinIO 上的 annotations.json）
+ *  - 行右侧「编辑」→ 弹框：类型用单选框，其余文本字段可编辑；多边形通常只有类型。
+ *  - 行右侧「删除」→ 二次确认后从源数据与各图 boxes 中移除。
+ *  - box 对象与 ann.value 里的源数组共享引用，就地改 content 即同步反映到写回体。
+ * ------------------------------------------------------------------ */
+type AnnRow = (typeof allRows.value)[number]
+
+const saving = ref(false)
+const editDialog = ref(false)
+const editBox = ref<CadBox | null>(null)
+const editName = ref('')
+const editType = ref('')
+/** 当前编辑的框是否自带「类型」字段（无类型的框不展示类型单选） */
+const editHasType = ref(false)
+/** 除类型外的可编辑文本字段（由 box.content 动态得出） */
+const editFields = ref<Array<{ key: string; label: string; value: string }>>([])
+
+/** 类型选项：已知代码 + 当前值（若未收录则追加一项，避免选中项不显示） */
+const typeOptions = computed(() => {
+  const opts = [...CAD_TYPE_OPTIONS]
+  const cur = editType.value
+  if (cur && !opts.some((o) => o.code === cur)) opts.unshift({ code: cur, label: `${cur}（未收录）` })
+  return opts
+})
+
+function startEdit(row: AnnRow) {
+  const box = row.box
+  editBox.value = box
+  editName.value = box.name ?? ''
+  editType.value = ''
+  editHasType.value = false
+  editFields.value = []
+  const content = box.content
+  if (content && !Array.isArray(content)) {
+    for (const [k, f] of Object.entries(content)) {
+      const v = f?.value
+      const text = v == null ? '' : typeof v === 'number' ? String(v) : typeof v === 'string' ? v : ''
+      if (k === 'type' || f?.type === 'radio') {
+        editType.value = text
+        editHasType.value = true
+      } else {
+        editFields.value.push({ key: k, label: f?.name || k, value: text })
+      }
+    }
+  }
+  editDialog.value = true
+}
+
+async function submitEdit() {
+  const box = editBox.value
+  const content = box?.content
+  if (box && content && !Array.isArray(content)) {
+    const map = content as CadFormMap
+    // 回写类型（radio）
+    for (const [k, f] of Object.entries(map)) {
+      if ((k === 'type' || f?.type === 'radio') && f) f.value = editType.value
+    }
+    // 回写其余文本字段
+    for (const ef of editFields.value) {
+      const f = map[ef.key]
+      if (f) f.value = ef.value
+    }
+    // 名称
+    const nm = editName.value.trim()
+    if (nm) box.name = nm
+    else if (box.name != null) box.name = ''
+  }
+  editDialog.value = false
+  await persist('已保存修改')
+}
+
+async function deleteBox(row: AnnRow) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除标注「${row.name}」？此操作会写回并覆盖原 annotations.json，不可恢复。`,
+      '删除标注',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const src = ann.value
+  if (!src) return
+  const removeFrom = (arr?: CadBox[]): boolean => {
+    if (!arr) return false
+    let i = arr.indexOf(row.box)
+    if (i < 0 && row.box.uuid) i = arr.findIndex((b) => b.uuid === row.box.uuid)
+    if (i >= 0) {
+      arr.splice(i, 1)
+      return true
+    }
+    return false
+  }
+  const ok = removeFrom(src.splitedAnnotation?.content) || removeFrom(src.splitedAnnotationPolygon?.content)
+  // 同步 UI：从各图 boxes 中移除
+  for (const img of images.value) {
+    const j = img.boxes.indexOf(row.box)
+    if (j >= 0) img.boxes.splice(j, 1)
+  }
+  if (activeBox.value === row.box) activeBox.value = null
+  if (hoverBox.value === row.box) hoverBox.value = null
+  if (!ok) {
+    ElMessage.warning('未在源数据中找到该标注，未写回')
+    return
+  }
+  await persist('已删除标注')
+}
+
+/** 把当前内存里的整份 annotations 写回 MinIO */
+async function persist(okMsg: string) {
+  const p = cadPath.value
+  if (!p || !ann.value) return
+  saving.value = true
+  try {
+    await saveCadAnnotations(p.annotationsKey, ann.value)
+    ElMessage.success(okMsg)
+  } catch (e: any) {
+    ElMessage.error(`保存失败：${e?.message ?? '未知错误'}`)
+  } finally {
+    saving.value = false
+  }
+}
+
 /**
  * 舞台层单击：按光标的自然像素坐标做命中选取，而不是依赖 SVG 元素自身的可点区域——
  * 矩形框 fill=none 时 SVG 不会把内部当命中区，叠在上面的大剖面多边形也会抢走点击。
@@ -347,12 +469,6 @@ function boxesForImage(img: CadImage): Array<{ box: CadBox; bi: number }> {
   return img.boxes
     .map((box, bi) => ({ box, bi }))
     .filter(({ box }) => shapeFilter.value === 'all' || (shapeFilter.value === 'polygon') === isPolygonBox(box))
-}
-
-/** 当前高亮框的标签文字：只显示数值（不再显示类型） */
-function boxLabelText(box: CadBox): string {
-  const { value } = boxTypeAndValue(box)
-  return value
 }
 
 /** 是否处于强调态（选中或悬停命中） */
@@ -642,7 +758,7 @@ watch(rawKey, load)
                       vector-effect="non-scaling-stroke"
                       stroke-linejoin="round"
                     />
-                    <!-- 选中框：顶点手柄 + 居中标签（悬停只加粗描边，避免满屏标签闪动） -->
+                    <!-- 选中框：仅顶点手柄（不再显示任何值标签） -->
                     <template v-if="activeBox === box">
                       <circle
                         v-if="showVertices"
@@ -656,17 +772,6 @@ watch(rawKey, load)
                         :stroke-width="1.5"
                         vector-effect="non-scaling-stroke"
                       />
-                      <text
-                        class="box-label"
-                        :x="boxCenter(box).x"
-                        :y="boxCenter(box).y"
-                        :font-size="labelFont(img.key)"
-                        :fill="boxColor(bi)"
-                        text-anchor="middle"
-                        dominant-baseline="middle"
-                      >
-                        {{ boxLabelText(box) }}
-                      </text>
                     </template>
                   </g>
                 </svg>
@@ -747,6 +852,10 @@ watch(rawKey, load)
                   </template>
                   <template v-else>{{ row.name }}</template>
                 </span>
+                <span class="ann-actions">
+                  <el-button link type="primary" size="small" @click.stop="startEdit(row)">编辑</el-button>
+                  <el-button link type="danger" size="small" @click.stop="deleteBox(row)">删除</el-button>
+                </span>
               </div>
               <div v-if="row.fields.length > 1" class="ann-line ann-line--sub">
                 <span v-for="f in row.fields.slice(1)" :key="f.label" class="ann-field">
@@ -759,6 +868,30 @@ watch(rawKey, load)
         </ul>
       </div>
     </section>
+
+    <!-- 标注编辑弹框：类型单选、其余文本可编辑；多边形通常只有类型 -->
+    <el-dialog v-model="editDialog" title="编辑标注" width="560px" top="8vh" append-to-body>
+      <el-form label-width="88px">
+        <el-form-item label="名称">
+          <el-input v-model="editName" placeholder="展示名称（可选）" clearable />
+        </el-form-item>
+        <el-form-item v-if="editHasType" label="类型">
+          <div class="type-radios">
+            <el-radio-group v-model="editType">
+              <el-radio v-for="o in typeOptions" :key="o.code" :value="o.code">{{ o.label }}</el-radio>
+            </el-radio-group>
+          </div>
+        </el-form-item>
+        <el-form-item v-for="ef in editFields" :key="ef.key" :label="ef.label">
+          <el-input v-model="ef.value" clearable />
+        </el-form-item>
+        <div v-if="!editHasType && !editFields.length" class="edit-empty">该标注无可编辑属性</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialog = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="submitEdit">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1116,6 +1249,33 @@ watch(rawKey, load)
 
 .ann-value {
   color: #409eff;
+}
+
+/* 行右侧操作区 */
+.ann-actions {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 编辑弹框：类型选项较多，限高滚动 */
+.type-radios {
+  width: 100%;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.type-radios :deep(.el-radio) {
+  margin-right: 16px;
+}
+
+.edit-empty {
+  padding: 4px 0 0 88px;
+  font-size: 13px;
+  color: #909399;
 }
 
 .empty {

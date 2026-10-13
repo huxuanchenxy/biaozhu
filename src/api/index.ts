@@ -81,11 +81,15 @@ const UPLOAD_API_BASE = (
   '/api'
 ).replace(/\/$/, '')
 
-export async function uploadOverwriteJson(fullPath: string, data: DocJsonRecord[]): Promise<void> {
+export async function uploadOverwriteObject(fullPath: string, data: unknown): Promise<void> {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const fileName = fullPath.split('/').pop() || 'data.json'
   const file = new File([blob], fileName, { type: 'application/json' })
   await http.upload<any>(`${UPLOAD_API_BASE}/file/uploadOverwrite`, file, { fullObjectPath: fullPath })
+}
+
+export async function uploadOverwriteJson(fullPath: string, data: DocJsonRecord[]): Promise<void> {
+  await uploadOverwriteObject(fullPath, data)
 }
 
 /**
