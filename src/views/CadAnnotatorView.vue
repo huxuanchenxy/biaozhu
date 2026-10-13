@@ -912,14 +912,31 @@ async function load() {
   }
 }
 
+/** 键盘 Delete：选中某框时按下，弹出与行内删除相同的确认框 */
+function onWindowKeyDown(e: KeyboardEvent) {
+  if (e.key !== 'Delete') return
+  // 弹框打开中、或焦点在输入控件里时不拦截
+  if (editDialog.value || addDialog.value) return
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+  const box = activeBox.value
+  if (!box) return
+  const row = allRows.value.find((r) => r.box === box)
+  if (!row) return
+  e.preventDefault()
+  deleteBox(row)
+}
+
 onMounted(() => {
   load()
   window.addEventListener('mousemove', onWindowMouseMove)
   window.addEventListener('mouseup', onWindowMouseUp)
+  window.addEventListener('keydown', onWindowKeyDown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onWindowMouseMove)
   window.removeEventListener('mouseup', onWindowMouseUp)
+  window.removeEventListener('keydown', onWindowKeyDown)
 })
 watch(rawKey, load)
 </script>
@@ -1180,27 +1197,33 @@ watch(rawKey, load)
               @mouseleave="hoverBox = null"
               @click="focusRow(row)"
             >
-              <div class="ann-line">
-                <span class="ann-no">{{ row.index + 1 }}</span>
-                <span class="ann-chip">
-                  <span class="ann-dot" :style="{ background: row.color }"></span>
-                  {{ row.name }}
-                </span>
-                <span class="ann-img-hint">{{ row.imageName }}</span>
-                <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
-                  {{ row.isPolygon ? '多边形' : '矩形' }}
-                </span> -->
-                <span class="ann-actions">
-                  <el-button link type="primary" size="small" :icon="EditIcon" @click.stop="startEdit(row)"></el-button>
-                  <el-button link type="danger" size="small" class="ann-del-btn" :icon="DeleteIcon" @click.stop="deleteBox(row)"></el-button>
-                </span>
+              <div class="ann-main">
+                <div class="ann-line">
+                  <span class="ann-no">{{ row.index + 1 }}</span>
+                  <span class="ann-chip">
+                    <span class="ann-dot" :style="{ background: row.color }"></span>
+                    {{ row.name }}
+                  </span>
+                  <span class="ann-img-hint">{{ row.imageName }}</span>
+                </div>
+                <div v-if="row.fields.length" class="ann-line ann-line--sub">
+                  <span v-for="f in row.fields" :key="f.label" class="ann-field">
+                    <span class="ann-key">{{ f.label }}</span
+                    ><span class="ann-sep">: </span><span class="ann-val">{{ f.value }}</span>
+                  </span>
+                </div>
               </div>
-              <div v-if="row.fields.length" class="ann-line ann-line--sub">
-                <span v-for="f in row.fields" :key="f.label" class="ann-field">
-                  <span class="ann-key">{{ f.label }}</span
-                  ><span class="ann-sep">: </span><span class="ann-val">{{ f.value }}</span>
-                </span>
-              </div>
+              <span class="ann-actions">
+                <el-button link type="primary" size="small" :icon="EditIcon" @click.stop="startEdit(row)"></el-button>
+                <el-button
+                  link
+                  type="danger"
+                  size="small"
+                  class="ann-del-btn"
+                  :icon="DeleteIcon"
+                  @click.stop="deleteBox(row)"
+                ></el-button>
+              </span>
             </li>
           </template>
         </ul>
@@ -1526,13 +1549,23 @@ watch(rawKey, load)
 
 .ann-item {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 14px;
   font-size: 13px;
   cursor: pointer;
   border-left: 3px solid transparent;
   border-bottom: 1px solid #eef0f3;
+}
+
+/* 左侧主区：名称行 + 属性行，宽度自适应，属性多时在此列内换行，不会钻到右侧按钮下方 */
+.ann-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 /* 多边形行用淡蓝底 + 虚线左边，与矩形区分 */
