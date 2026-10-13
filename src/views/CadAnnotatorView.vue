@@ -148,8 +148,23 @@ function onWheel(img: CadImage, e: WheelEvent) {
   t.scale = next
 }
 
-/** 抓手模式：按下开始平移 */
+/** 抓手模式：按下开始平移；绘制模式下改走框选/顶点采集 */
 function onStageMouseDown(img: CadImage, e: MouseEvent) {
+  if (drawMode[img.key] === 'rect') {
+    const pt = naturalPoint(img, e)
+    if (pt) {
+      draft.imageIndex = images.value.indexOf(img)
+      draft.shape = 'rect'
+      draft.x0 = pt.x
+      draft.y0 = pt.y
+      draft.x1 = pt.x
+      draft.y1 = pt.y
+      rectDrawing = true
+      e.preventDefault()
+    }
+    return
+  }
+  if (drawMode[img.key] === 'polygon') return // 多边形顶点在 click 里累加
   if (!panMode[img.key]) return
   const t = tf(img.key)
   drag = { key: img.key, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y, moved: false }
@@ -157,6 +172,14 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
   e.preventDefault()
 }
 function onWindowMouseMove(e: MouseEvent) {
+  if (rectDrawing && draft.shape === 'rect') {
+    const pt = naturalPointAt(draft.imageIndex, e.clientX, e.clientY)
+    if (pt) {
+      draft.x1 = pt.x
+      draft.y1 = pt.y
+    }
+    return
+  }
   if (!drag) return
   const t = tf(drag.key)
   const dx = e.clientX - drag.sx
@@ -166,6 +189,12 @@ function onWindowMouseMove(e: MouseEvent) {
   t.y = drag.oy + dy
 }
 function onWindowMouseUp() {
+  if (rectDrawing) {
+    rectDrawing = false
+    suppressNextClick = true
+    finalizeRect()
+    return
+  }
   drag = null
   dragging.value = false
 }
@@ -178,12 +207,10 @@ function resetTransform(img: CadImage) {
 
 /** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；悬停到可点框→pointer；否则→默认（不显放大镜） */
 function cursorFor(key: string): string {
+  if (drawMode[key]) return 'crosshair'
   if (panMode[key]) return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
   return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'default'
 }
-
-/** 当前选中图片 */
-const currentImage = computed<CadImage | null>(() => images.value[selectedIndex.value] ?? null)
 
 /** 叠加层尺寸基准：viewBox 为自然像素，按图宽归一（以 1000px 为 1 单）使线宽/字体不随图大小差异 */
 function unit(key: string): number {
@@ -435,6 +462,206 @@ async function persist(okMsg: string) {
   }
 }
 
+/* ------------------------------------------------------------------
+ * 新增标注：在切图上绘制几何（矩形拖拽框选 / 多边形单击顶点），
+ *  完成后弹属性框选类型(+数值)，写入 ann.value 源数组并覆盖回 MinIO。
+ * ------------------------------------------------------------------ */
+type DrawShape = 'rect' | 'polygon'
+const drawMode = reactive<Record<string, DrawShape | ''>>({})
+const draft = reactive<{
+  imageIndex: number
+  shape: DrawShape | ''
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  points: number[]
+}>({ imageIndex: -1, shape: '', x0: 0, y0: 0, x1: 0, y1: 0, points: [] })
+const addDialog = ref(false)
+const addIsPolygon = ref(false)
+const addType = ref('')
+const addValue = ref('')
+const pendingBox = ref<{ box: CadBox; imageIndex: number } | null>(null)
+let rectDrawing = false
+let suppressNextClick = false
+
+/** 新增弹框类型选项：按形状选用矩形/多边形清单 */
+const addTypeOptions = computed(() => [...(addIsPolygon.value ? CAD_POLYGON_TYPE_OPTIONS : CAD_RECT_TYPE_OPTIONS)])
+
+/** 按图片下标 + 视口坐标换算自然像素坐标（窗口级监听里用，currentTarget 非 stage） */
+function naturalPointAt(i: number, clientX: number, clientY: number): CadCorner | null {
+  const img = images.value[i]
+  if (!img) return null
+  const stage = document.getElementById(`cad-img-${i}`)?.querySelector('.img-stage') as HTMLElement | null
+  const imgEl = stage?.querySelector('.img-el') as HTMLImageElement | null
+  const d = dims[img.key]
+  if (!imgEl || !d) return null
+  const r = imgEl.getBoundingClientRect()
+  if (!r.width || !r.height) return null
+  return { x: ((clientX - r.left) / r.width) * d.w, y: ((clientY - r.top) / r.height) * d.h }
+}
+
+function toggleDraw(img: CadImage, shape: DrawShape) {
+  const key = img.key
+  const i = images.value.indexOf(img)
+  if (drawMode[key] === shape) {
+    stopDraw()
+    return
+  }
+  stopDraw()
+  drawMode[key] = shape
+  panMode[key] = false
+  selectedIndex.value = i
+  draft.imageIndex = i
+  draft.shape = shape
+  draft.points = []
+  draft.x0 = draft.y0 = draft.x1 = draft.y1 = 0
+  activeBox.value = null
+}
+function stopDraw() {
+  for (const k of Object.keys(drawMode)) drawMode[k] = ''
+  draft.shape = ''
+  draft.imageIndex = -1
+  draft.points = []
+  rectDrawing = false
+}
+
+function onStageDblClick(img: CadImage, e: MouseEvent) {
+  if (drawMode[img.key] === 'polygon') {
+    e.preventDefault()
+    finalizePolygon()
+    return
+  }
+  resetTransform(img)
+}
+
+function draftRect() {
+  const x = Math.min(draft.x0, draft.x1)
+  const y = Math.min(draft.y0, draft.y1)
+  return { x, y, w: Math.abs(draft.x1 - draft.x0), h: Math.abs(draft.y1 - draft.y0) }
+}
+function draftPolyPoints(): string {
+  let s = ''
+  for (let k = 0; k + 1 < draft.points.length; k += 2) s += `${draft.points[k]},${draft.points[k + 1]} `
+  return s.trim()
+}
+function draftVertices(): CadCorner[] {
+  const out: CadCorner[] = []
+  for (let k = 0; k + 1 < draft.points.length; k += 2) out.push({ x: draft.points[k], y: draft.points[k + 1] })
+  return out
+}
+
+function finalizeRect() {
+  const r = draftRect()
+  if (r.w < 4 || r.h < 4) {
+    ElMessage.info('框太小，已取消')
+    stopDraw()
+    return
+  }
+  openAddDialog('rect', { x: r.x, y: r.y, width: r.w, height: r.h })
+}
+function finalizePolygon() {
+  if (draft.points.length / 2 < 3) {
+    ElMessage.info('至少需要 3 个顶点')
+    return
+  }
+  openAddDialog('polygon', { points: [...draft.points] })
+}
+
+/** 反查某张切图在 splited_image 里的序号 N（用于生成 displayKey） */
+function splitIndexForImage(img: CadImage, fallback: number): number {
+  const data = ann.value
+  if (data) {
+    const arr = data.splited_image ?? []
+    for (let n = 0; n < arr.length; n++) if (splitedImageName(data, n) === img.name) return n
+  }
+  return fallback
+}
+function genUuid(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto
+  if (c?.randomUUID) return c.randomUUID()
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function openAddDialog(
+  shape: DrawShape,
+  geom: { x?: number; y?: number; width?: number; height?: number; points?: number[] },
+) {
+  const i = draft.imageIndex
+  const img = images.value[i]
+  if (!img) {
+    stopDraw()
+    return
+  }
+  const d = dims[img.key]
+  const n = splitIndexForImage(img, i)
+  const box: CadBox = {
+    type: shape === 'polygon' ? 'polygon' : 'rect',
+    toolbarKey: shape === 'polygon' ? 'splitedAnnotationPolygon' : 'splitedAnnotation',
+    displayKey: `pictureList-imgShow-${n}-1`,
+    rotation: 0,
+    imageWidth: d?.w,
+    imageHeight: d?.h,
+    uuid: genUuid(),
+    name: '',
+  }
+  if (shape === 'polygon' && geom.points) {
+    const pts = geom.points
+    box.points = pts
+    const xs = pts.filter((_, k) => k % 2 === 0)
+    const ys = pts.filter((_, k) => k % 2 === 1)
+    box.x = Math.min(...xs)
+    box.y = Math.min(...ys)
+    box.width = Math.max(...xs) - box.x
+    box.height = Math.max(...ys) - box.y
+  } else if (geom.x != null) {
+    box.x = geom.x
+    box.y = geom.y
+    box.width = geom.width
+    box.height = geom.height
+  }
+  pendingBox.value = { box, imageIndex: i }
+  addIsPolygon.value = shape === 'polygon'
+  addType.value = ''
+  addValue.value = ''
+  stopDraw()
+  addDialog.value = true
+}
+
+function cancelAdd() {
+  addDialog.value = false
+  pendingBox.value = null
+}
+
+async function submitAdd() {
+  const pb = pendingBox.value
+  const src = ann.value
+  if (!pb || !src) return
+  const { box, imageIndex } = pb
+  const content: CadFormMap = { type: { type: 'radio', name: '类型', value: addType.value } }
+  if (!addIsPolygon.value) content.value = { type: 'input', name: '数值', value: addValue.value }
+  box.content = content
+  // 名称由系统生成：形状前缀 + 该图内同类形状序号（与既有 矩形-N / 多边形-N 命名一致）
+  const imgBoxes = images.value[imageIndex]?.boxes ?? []
+  const seq = imgBoxes.filter((b) => isPolygonBox(b) === addIsPolygon.value).length + 1
+  box.name = `${addIsPolygon.value ? '多边形' : '矩形'}-${seq}`
+  if (addIsPolygon.value) {
+    if (!src.splitedAnnotationPolygon) src.splitedAnnotationPolygon = { content: [] }
+    if (!src.splitedAnnotationPolygon.content) src.splitedAnnotationPolygon.content = []
+    src.splitedAnnotationPolygon.content.push(box)
+  } else {
+    if (!src.splitedAnnotation) src.splitedAnnotation = { content: [] }
+    if (!src.splitedAnnotation.content) src.splitedAnnotation.content = []
+    src.splitedAnnotation.content.push(box)
+  }
+  if (images.value[imageIndex]) images.value[imageIndex].boxes.push(box)
+  addDialog.value = false
+  pendingBox.value = null
+  activeBox.value = box
+  scrollToRow(box)
+  await persist('已新增标注')
+}
+
 /**
  * 舞台层单击：按光标的自然像素坐标做命中选取，而不是依赖 SVG 元素自身的可点区域——
  * 矩形框 fill=none 时 SVG 不会把内部当命中区，叠在上面的大剖面多边形也会抢走点击。
@@ -442,6 +669,16 @@ async function persist(okMsg: string) {
  */
 function onStageClick(img: CadImage, e: MouseEvent) {
   selectedIndex.value = images.value.indexOf(img)
+  if (suppressNextClick) {
+    suppressNextClick = false
+    return
+  }
+  if (drawMode[img.key] === 'polygon') {
+    const pt = naturalPoint(img, e)
+    if (pt) draft.points.push(Math.round(pt.x), Math.round(pt.y))
+    return
+  }
+  if (drawMode[img.key] === 'rect') return
   if (drag?.moved) return
   const pt = naturalPoint(img, e)
   if (!pt) {
@@ -712,11 +949,46 @@ watch(rawKey, load)
             <el-button
               size="small"
               round
+              :disabled="!!drawMode[img.key]"
               :type="panMode[img.key] ? 'primary' : 'default'"
               @click.stop="togglePan(img.key)"
             >
               {{ panMode[img.key] ? '👉 拖动中' : '✋ 抓手' }}
             </el-button>
+            <el-button
+              size="small"
+              round
+              :type="drawMode[img.key] === 'rect' ? 'primary' : 'default'"
+              @click.stop="toggleDraw(img, 'rect')"
+            >
+              ▭ 矩形
+            </el-button>
+            <el-button
+              size="small"
+              round
+              :type="drawMode[img.key] === 'polygon' ? 'primary' : 'default'"
+              @click.stop="toggleDraw(img, 'polygon')"
+            >
+              ◇ 多边形
+            </el-button>
+          </div>
+          <div v-if="drawMode[img.key]" class="draw-bar">
+            <span class="draw-tip">
+              {{
+                drawMode[img.key] === 'rect'
+                  ? '绘制矩形：在图上按住鼠标拖拽框选范围'
+                  : '绘制多边形：单击依次添加顶点，双击或点「完成」结束'
+              }}
+            </span>
+            <el-button
+              v-if="drawMode[img.key] === 'polygon'"
+              size="small"
+              type="primary"
+              :disabled="draftVertices().length < 3"
+              @click.stop="finalizePolygon"
+              >完成</el-button
+            >
+            <el-button size="small" @click.stop="stopDraw">取消</el-button>
           </div>
           <div class="img-card-body">
             <div
@@ -725,7 +997,7 @@ watch(rawKey, load)
               @wheel="onWheel(img, $event)"
               @mousedown="onStageMouseDown(img, $event)"
               @click.stop="onStageClick(img, $event)"
-              @dblclick="resetTransform(img)"
+              @dblclick="onStageDblClick(img, $event)"
               @mousemove="onStageMove(img, $event)"
               @mouseleave="onImgLeave"
             >
@@ -780,6 +1052,52 @@ watch(rawKey, load)
                       />
                     </template>
                   </g>
+                  <!-- 新增绘制预览 -->
+                  <g v-if="draft.shape && draft.imageIndex === i">
+                    <rect
+                      v-if="draft.shape === 'rect'"
+                      :x="draftRect().x"
+                      :y="draftRect().y"
+                      :width="draftRect().w"
+                      :height="draftRect().h"
+                      fill="rgba(64,158,255,0.15)"
+                      stroke="#409eff"
+                      stroke-dasharray="6 4"
+                      :stroke-width="2"
+                      vector-effect="non-scaling-stroke"
+                    />
+                    <template v-else>
+                      <polygon
+                        v-if="draftVertices().length >= 3"
+                        :points="draftPolyPoints()"
+                        fill="rgba(64,158,255,0.12)"
+                        stroke="#409eff"
+                        stroke-dasharray="6 4"
+                        :stroke-width="2"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <polyline
+                        v-else-if="draftVertices().length >= 2"
+                        :points="draftPolyPoints()"
+                        fill="none"
+                        stroke="#409eff"
+                        stroke-dasharray="6 4"
+                        :stroke-width="2"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <circle
+                        v-for="(v, vi) in draftVertices()"
+                        :key="`dp-${vi}`"
+                        :cx="v.x"
+                        :cy="v.y"
+                        :r="vertexRadius(img.key)"
+                        fill="#409eff"
+                        stroke="#fff"
+                        :stroke-width="1.5"
+                        vector-effect="non-scaling-stroke"
+                      />
+                    </template>
+                  </g>
                 </svg>
               </div>
               <!-- 十字辅助线：铺满整个视口（含图片外），随光标定位 -->
@@ -807,8 +1125,10 @@ watch(rawKey, load)
     <!-- 右：标注信息 -->
     <section class="pane pane-right">
       <header class="pane-head">
-        <span class="pane-title">标注信息</span>
-        <span class="hint"> {{ allRows.length }} 项</span>
+        <div class="pane-head-l">
+          <span class="pane-title">标注信息</span>
+          <span class="hint"> {{ allRows.length }} 项</span>
+        </div>
       </header>
 
       <div class="pane-body ann-list">
@@ -891,6 +1211,29 @@ watch(rawKey, load)
         <el-button type="primary" :loading="saving" @click="submitEdit">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 新增标注弹框：几何已在图上绘制，此处选类型(+数值)并写回 -->
+    <el-dialog v-model="addDialog" title="新增标注" width="560px" top="8vh" append-to-body>
+      <el-form label-width="88px">
+        <el-form-item label="形状">
+          <el-tag :type="addIsPolygon ? 'warning' : 'primary'">{{ addIsPolygon ? '多边形' : '矩形' }}</el-tag>
+        </el-form-item>
+        <el-form-item label="类型">
+          <div class="type-radios">
+            <el-radio-group v-model="addType">
+              <el-radio v-for="o in addTypeOptions" :key="o.code" :value="o.code">{{ o.label }}</el-radio>
+            </el-radio-group>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="!addIsPolygon" label="数值">
+          <el-input v-model="addValue" placeholder="尺寸/数值（可选）" clearable />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cancelAdd">取消</el-button>
+        <el-button type="primary" :loading="saving" :disabled="!addType" @click="submitAdd">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -938,6 +1281,36 @@ watch(rawKey, load)
 }
 
 .hint {
+  font-size: 12px;
+  color: #a8abb2;
+}
+
+/* 右栏头部：标题+计数居左，新增按钮居右 */
+.pane-head-l {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* 卡片内绘制提示条 */
+.draw-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #ecf5ff;
+  border-bottom: 1px solid #d9ecff;
+  font-size: 12px;
+}
+.draw-tip {
+  flex: 1;
+  min-width: 0;
+  color: #409eff;
+}
+
+/* 新增弹框：形状旁的说明 */
+.add-hint {
+  margin-left: 10px;
   font-size: 12px;
   color: #a8abb2;
 }
@@ -998,6 +1371,7 @@ watch(rawKey, load)
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 8px 12px;
   border-bottom: 1px solid #f0f0f0;
