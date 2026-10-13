@@ -289,13 +289,29 @@ const allRows = computed(() => {
   return rows
 })
 
+/** 从名称末尾解析序号（矩形-N / 多边形-N）；无尾数字时排到末尾 */
+function shapeSeqOfName(name: string): number {
+  const m = /(\d+)\s*$/.exec((name || '').trim())
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER
+}
+
 /** 按筛选条件后的行（按矩形/多边形分组排列），以及两种形状下的总数 */
 const visibleRows = computed(() => {
-  if (shapeFilter.value === 'rect') return allRows.value.filter((r) => !r.isPolygon)
-  if (shapeFilter.value === 'polygon') return allRows.value.filter((r) => r.isPolygon)
+  const bySeq = (a: (typeof allRows.value)[number], b: (typeof allRows.value)[number]) =>
+    shapeSeqOfName(a.name) - shapeSeqOfName(b.name)
+  // 组内按名称序号排序：新标注序号最大→排在最后；并按组内位置重新编号 no
+  const rectRows = allRows.value
+    .filter((r) => !r.isPolygon)
+    .sort(bySeq)
+    .map((r, i) => ({ ...r, no: i + 1 }))
+  const polyRows = allRows.value
+    .filter((r) => r.isPolygon)
+    .sort(bySeq)
+    .map((r, i) => ({ ...r, no: i + 1 }))
+  if (shapeFilter.value === 'rect') return rectRows
+  if (shapeFilter.value === 'polygon') return polyRows
   // 全部：先矩形后多边形，使右栏按形状分类展示
-  const rows = allRows.value
-  return [...rows.filter((r) => !r.isPolygon), ...rows.filter((r) => r.isPolygon)]
+  return [...rectRows, ...polyRows]
 })
 const rectCount = computed(() => allRows.value.filter((r) => !r.isPolygon).length)
 const polyCount = computed(() => allRows.value.filter((r) => r.isPolygon).length)
@@ -552,6 +568,28 @@ function draftVertices(): CadCorner[] {
   for (let k = 0; k + 1 < draft.points.length; k += 2) out.push({ x: draft.points[k], y: draft.points[k + 1] })
   return out
 }
+/** 最后一个已确定的顶点（橡皮筋起点） */
+function lastDraftVertex(): CadCorner {
+  const vs = draftVertices()
+  return vs.length ? vs[vs.length - 1] : { x: 0, y: 0 }
+}
+/** 自然坐标下是否落在“起点大空心圆”上（≥ 3 顶点时才作为闭合目标） */
+function nearFirstVertex(x: number, y: number, key: string): boolean {
+  if (draft.points.length < 6) return false
+  const dx = x - draft.points[0]
+  const dy = y - draft.points[1]
+  const r = vertexRadius(key) * 2.6
+  return dx * dx + dy * dy <= r * r
+}
+/** 当前光标是否悬停在起点上（提示“点击闭合”） */
+function polygonClosingHint(key: string): boolean {
+  return (
+    draft.shape === 'polygon' &&
+    hover.show &&
+    hover.key === key &&
+    nearFirstVertex(hover.natX, hover.natY, key)
+  )
+}
 
 function finalizeRect() {
   const r = draftRect()
@@ -694,7 +732,13 @@ function onStageClick(img: CadImage, e: MouseEvent) {
   }
   if (drawMode[img.key] === 'polygon') {
     const pt = naturalPoint(img, e)
-    if (pt) draft.points.push(Math.round(pt.x), Math.round(pt.y))
+    if (!pt) return
+    // 已有 ≥ 3 个顶点时，点回第一个顶点→闭合并结束
+    if (nearFirstVertex(pt.x, pt.y, img.key)) {
+      finalizePolygon()
+      return
+    }
+    draft.points.push(Math.round(pt.x), Math.round(pt.y))
     return
   }
   if (drawMode[img.key] === 'rect') return
@@ -1013,7 +1057,7 @@ watch(rawKey, load)
               {{
                 drawMode[img.key] === 'rect'
                   ? '绘制矩形：在图上按住鼠标拖拽框选范围'
-                  : '绘制多边形：单击依次添加顶点，双击或点「完成」结束'
+                  : '绘制多边形：单击依次添加顶点，点回起点的空心圆即闭合（也可双击或点「完成」）'
               }}
             </span>
             <el-button
@@ -1103,33 +1147,72 @@ watch(rawKey, load)
                       vector-effect="non-scaling-stroke"
                     />
                     <template v-else>
+                      <!-- 已确定的边：实线蓝；≥ 3 点时闭合并淡蓝填充 -->
                       <polygon
                         v-if="draftVertices().length >= 3"
                         :points="draftPolyPoints()"
-                        fill="rgba(64,158,255,0.12)"
-                        stroke="#409eff"
-                        stroke-dasharray="6 4"
-                        :stroke-width="2"
+                        fill="rgba(22,119,255,0.10)"
+                        stroke="#1677ff"
+                        stroke-linejoin="round"
+                        :stroke-width="3"
                         vector-effect="non-scaling-stroke"
                       />
                       <polyline
                         v-else-if="draftVertices().length >= 2"
                         :points="draftPolyPoints()"
                         fill="none"
-                        stroke="#409eff"
-                        stroke-dasharray="6 4"
-                        :stroke-width="2"
+                        stroke="#1677ff"
+                        stroke-linejoin="round"
+                        :stroke-width="3"
                         vector-effect="non-scaling-stroke"
                       />
+                      <!-- 橡皮筋：从最后一个顶点到当前光标的实时边 -->
+                      <line
+                        v-if="draftVertices().length >= 1 && hover.show && hover.key === img.key"
+                        :x1="lastDraftVertex().x"
+                        :y1="lastDraftVertex().y"
+                        :x2="hover.natX"
+                        :y2="hover.natY"
+                        stroke="#1677ff"
+                        stroke-dasharray="6 4"
+                        :stroke-width="3"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <!-- 已确定的顶点：首点为大空心圆（闭合目标），其余为红色实心 -->
+                      <template v-for="(v, vi) in draftVertices()" :key="`dp-${vi}`">
+                        <circle
+                          v-if="vi === 0"
+                          class="draft-start-vertex"
+                          :class="{ 'draft-start-vertex--close': polygonClosingHint(img.key) }"
+                          :cx="v.x"
+                          :cy="v.y"
+                          :r="vertexRadius(img.key) * (polygonClosingHint(img.key) ? 2.6 : 2)"
+                          fill="none"
+                          :stroke="polygonClosingHint(img.key) ? '#fadb14' : '#1677ff'"
+                          :stroke-width="3"
+                          vector-effect="non-scaling-stroke"
+                        />
+                        <circle
+                          v-else
+                          :cx="v.x"
+                          :cy="v.y"
+                          :r="vertexRadius(img.key)"
+                          fill="#f5222d"
+                          stroke="#fff"
+                          :stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
+                        />
+                      </template>
+                      <!-- 光标处的待定顶点：白底 + 黄色光晕 -->
                       <circle
-                        v-for="(v, vi) in draftVertices()"
-                        :key="`dp-${vi}`"
-                        :cx="v.x"
-                        :cy="v.y"
+                        v-if="draftVertices().length >= 1 && hover.show && hover.key === img.key"
+                        class="draft-cursor-vertex"
+                        :cx="hover.natX"
+                        :cy="hover.natY"
                         :r="vertexRadius(img.key)"
-                        fill="#409eff"
-                        stroke="#fff"
-                        :stroke-width="1.5"
+                        fill="#fff"
+                        stroke="#fadb14"
+                        :stroke-width="3"
                         vector-effect="non-scaling-stroke"
                       />
                     </template>
@@ -1199,7 +1282,7 @@ watch(rawKey, load)
             >
               <div class="ann-main">
                 <div class="ann-line">
-                  <span class="ann-no">{{ row.index + 1 }}</span>
+                  <span class="ann-no">{{ row.no }}</span>
                   <span class="ann-chip">
                     <span class="ann-dot" :style="{ background: row.color }"></span>
                     {{ row.name }}
@@ -1357,6 +1440,19 @@ watch(rawKey, load)
   margin-left: 10px;
   font-size: 12px;
   color: #a8abb2;
+}
+
+/* 多边形绘制：光标处待定顶点的黄色光晕 */
+.draft-cursor-vertex {
+  filter: drop-shadow(0 0 6px rgba(250, 219, 20, 0.95));
+}
+
+/* 多边形起点大空心圆：悬停时高亮提示“点击闭合” */
+.draft-start-vertex {
+  cursor: pointer;
+}
+.draft-start-vertex--close {
+  filter: drop-shadow(0 0 8px rgba(250, 219, 20, 0.95));
 }
 
 .cad-path {
