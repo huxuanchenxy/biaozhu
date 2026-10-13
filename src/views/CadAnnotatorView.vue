@@ -956,8 +956,19 @@ async function load() {
   }
 }
 
-/** 键盘 Delete：选中某框时按下，弹出与行内删除相同的确认框 */
+/** 键盘全局：Esc 取消退出绘制；Delete 对选中框弹出删除确认 */
 function onWindowKeyDown(e: KeyboardEvent) {
+  // Esc：绘制中（矩形/多边形）取消退出；弹框打开时交给弹框自身处理
+  if (e.key === 'Escape') {
+    if (editDialog.value || addDialog.value) return
+    const drawing = draft.shape !== '' || Object.values(drawMode).some((m) => m !== '')
+    if (drawing) {
+      e.preventDefault()
+      stopDraw()
+      ElMessage.info('已取消绘制')
+    }
+    return
+  }
   if (e.key !== 'Delete') return
   // 弹框打开中、或焦点在输入控件里时不拦截
   if (editDialog.value || addDialog.value) return
@@ -1056,8 +1067,8 @@ watch(rawKey, load)
             <span class="draw-tip">
               {{
                 drawMode[img.key] === 'rect'
-                  ? '绘制矩形：在图上按住鼠标拖拽框选范围'
-                  : '绘制多边形：单击依次添加顶点，点回起点的空心圆即闭合（也可双击或点「完成」）'
+                  ? '绘制矩形：在图上按住鼠标拖拽框选范围（Esc 取消）'
+                  : '绘制多边形：单击依次添加顶点，点回起点的空心圆即闭合（也可双击或点「完成」，Esc 取消）'
               }}
             </span>
             <el-button
@@ -1147,18 +1158,9 @@ watch(rawKey, load)
                       vector-effect="non-scaling-stroke"
                     />
                     <template v-else>
-                      <!-- 已确定的边：实线蓝；≥ 3 点时闭合并淡蓝填充 -->
-                      <polygon
-                        v-if="draftVertices().length >= 3"
-                        :points="draftPolyPoints()"
-                        fill="rgba(22,119,255,0.10)"
-                        stroke="#1677ff"
-                        stroke-linejoin="round"
-                        :stroke-width="3"
-                        vector-effect="non-scaling-stroke"
-                      />
+                      <!-- 已确定的边：开放折线，不自动连回起点（只有点回起点闭合时才成环） -->
                       <polyline
-                        v-else-if="draftVertices().length >= 2"
+                        v-if="draftVertices().length >= 2"
                         :points="draftPolyPoints()"
                         fill="none"
                         stroke="#1677ff"
@@ -1186,10 +1188,10 @@ watch(rawKey, load)
                           :class="{ 'draft-start-vertex--close': polygonClosingHint(img.key) }"
                           :cx="v.x"
                           :cy="v.y"
-                          :r="vertexRadius(img.key) * (polygonClosingHint(img.key) ? 2.6 : 2)"
+                          :r="vertexRadius(img.key) * (polygonClosingHint(img.key) ? 3.4 : 2.8)"
                           fill="none"
-                          :stroke="polygonClosingHint(img.key) ? '#fadb14' : '#1677ff'"
-                          :stroke-width="3"
+                          stroke="#ff9800"
+                          :stroke-width="4"
                           vector-effect="non-scaling-stroke"
                         />
                         <circle
@@ -1447,12 +1449,13 @@ watch(rawKey, load)
   filter: drop-shadow(0 0 6px rgba(250, 219, 20, 0.95));
 }
 
-/* 多边形起点大空心圆：悬停时高亮提示“点击闭合” */
+/* 多边形起点大空心圆：亮橘黄，悬停时高亮提示“点击闭合” */
 .draft-start-vertex {
   cursor: pointer;
+  filter: drop-shadow(0 0 4px rgba(255, 152, 0, 0.7));
 }
 .draft-start-vertex--close {
-  filter: drop-shadow(0 0 8px rgba(250, 219, 20, 0.95));
+  filter: drop-shadow(0 0 9px rgba(255, 152, 0, 0.95));
 }
 
 .cad-path {
