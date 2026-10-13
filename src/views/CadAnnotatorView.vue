@@ -347,10 +347,10 @@ function boxesForImage(img: CadImage): Array<{ box: CadBox; bi: number }> {
     .filter(({ box }) => shapeFilter.value === 'all' || (shapeFilter.value === 'polygon') === isPolygonBox(box))
 }
 
-/** 当前高亮框的标签文字：类型 + 数值（多边形往往只有类型） */
+/** 当前高亮框的标签文字：只显示数值（不再显示类型） */
 function boxLabelText(box: CadBox): string {
-  const { type, value } = boxTypeAndValue(box)
-  return [type || boxShapeLabel(box), value].filter(Boolean).join(' ')
+  const { value } = boxTypeAndValue(box)
+  return value
 }
 
 /** 是否处于强调态（选中或悬停命中） */
@@ -367,8 +367,8 @@ function shapeFillOpacity(box: CadBox): number {
   return isPolygonBox(box) && fillPolygons.value ? 0.14 : 0
 }
 function shapeStrokeWidth(box: CadBox): number {
-  if (activeBox.value === box) return 3
-  return hoverBox.value === box ? 2.5 : 1.5
+  if (activeBox.value === box) return 5
+  return hoverBox.value === box ? 4 : 3
 }
 function shapeOpacity(box: CadBox): number {
   return activeBox.value && activeBox.value !== box && hoverBox.value !== box ? 0.4 : 1
@@ -553,18 +553,18 @@ watch(rawKey, load)
         <span v-if="loading" class="hint">加载中…</span>
         <span v-else class="hint">{{ images.length }} 张切图</span>
       </header>
-      <div class="cad-path">当前图片：{{ currentImage?.displayPath || (cadPath?.imagesPrefix ?? '') }}</div>
+      <!-- <div class="cad-path">当前图片：{{ currentImage?.displayPath || (cadPath?.imagesPrefix ?? '') }}</div> -->
 
       <!-- 叠加层工具条：形状筛选 + 绘制开关 -->
       <div class="cad-toolbar">
-        <el-radio-group v-model="shapeFilter" size="small">
+        <!-- <el-radio-group v-model="shapeFilter" size="small">
           <el-radio-button value="all">全部 {{ allRows.length }}</el-radio-button>
           <el-radio-button value="rect">矩形 {{ rectCount }}</el-radio-button>
           <el-radio-button value="polygon">多边形 {{ polyCount }}</el-radio-button>
         </el-radio-group>
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
-        <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox>
+        <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
         <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏</span>
       </div>
 
@@ -736,18 +736,19 @@ watch(rawKey, load)
                 <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
                   {{ row.isPolygon ? '多边形' : '矩形' }}
                 </span> -->
-                <span class="ann-field">{{ row.fields[0] ? `${row.fields[0].label}: ${row.fields[0].value}` : row.name }}</span>
-              </div>
-              <div v-if="row.fields.length > 1 || row.isPolygon" class="ann-line ann-line--sub">
-                <span
-                  v-for="f in row.fields.slice(1)"
-                  :key="f.label"
-                  :class="['ann-field', { 'ann-value': f.isValue }]"
-                >
-                  {{ f.label }}: {{ f.value }}
+                <span class="ann-field">
+                  <template v-if="row.fields[0]">
+                    <span class="ann-key">{{ row.fields[0].label }}</span
+                    ><span class="ann-sep">: </span><span class="ann-val">{{ row.fields[0].value }}</span>
+                  </template>
+                  <template v-else>{{ row.name }}</template>
                 </span>
-                <span v-if="row.isPolygon" class="ann-field">顶点: {{ row.vertices }}</span>
-                <span v-if="row.isPolygon && row.extent" class="ann-field">外接: {{ row.extent }}</span>
+              </div>
+              <div v-if="row.fields.length > 1" class="ann-line ann-line--sub">
+                <span v-for="f in row.fields.slice(1)" :key="f.label" class="ann-field">
+                  <span class="ann-key">{{ f.label }}</span
+                  ><span class="ann-sep">: </span><span class="ann-val">{{ f.value }}</span>
+                </span>
               </div>
             </li>
           </template>
@@ -1085,6 +1086,19 @@ watch(rawKey, load)
 
 .ann-field {
   color: #909399;
+}
+
+/* 键（字段名）统一蓝色，值统一深灰 */
+.ann-key {
+  color: #409eff;
+}
+
+.ann-sep {
+  color: #909399;
+}
+
+.ann-val {
+  color: #303133;
 }
 
 .ann-value {
