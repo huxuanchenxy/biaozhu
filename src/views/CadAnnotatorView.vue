@@ -260,11 +260,13 @@ const allRows = computed(() => {
   return rows
 })
 
-/** 按筛选条件后的行，以及三种形状下的总数 */
+/** 按筛选条件后的行（按矩形/多边形分组排列），以及两种形状下的总数 */
 const visibleRows = computed(() => {
   if (shapeFilter.value === 'rect') return allRows.value.filter((r) => !r.isPolygon)
   if (shapeFilter.value === 'polygon') return allRows.value.filter((r) => r.isPolygon)
-  return allRows.value
+  // 全部：先矩形后多边形，使右栏按形状分类展示
+  const rows = allRows.value
+  return [...rows.filter((r) => !r.isPolygon), ...rows.filter((r) => r.isPolygon)]
 })
 const rectCount = computed(() => allRows.value.filter((r) => !r.isPolygon).length)
 const polyCount = computed(() => allRows.value.filter((r) => r.isPolygon).length)
@@ -712,10 +714,11 @@ watch(rawKey, load)
         <ul v-if="visibleRows.length" class="ann-ul">
           <template v-for="(row, idx) in visibleRows" :key="`${row.imageIndex}-${row.index}`">
             <li
-              v-if="idx === 0 || visibleRows[idx - 1].imageIndex !== row.imageIndex"
+              v-if="idx === 0 || visibleRows[idx - 1].isPolygon !== row.isPolygon"
               class="ann-group"
             >
-              {{ row.imageName }}
+              {{ row.isPolygon ? '多边形' : '矩形' }}
+              <span class="hint">{{ row.isPolygon ? polyCount : rectCount }} 项</span>
             </li>
             <li
               :id="`ann-row-${row.imageIndex}-${row.index}`"
@@ -733,6 +736,7 @@ watch(rawKey, load)
                   <span class="ann-dot" :style="{ background: row.color }"></span>
                   {{ row.name }}
                 </span>
+                <span class="ann-img-hint">{{ row.imageName }}</span>
                 <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
                   {{ row.isPolygon ? '多边形' : '矩形' }}
                 </span> -->
@@ -1049,6 +1053,15 @@ watch(rawKey, load)
   width: 20px;
   color: #909399;
   text-align: right;
+}
+
+/* 按形状分组后，行内保留所属图片名以便回溯 */
+.ann-img-hint {
+  font-size: 12px;
+  color: #a8abb2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ann-chip {
