@@ -14,6 +14,7 @@ import {
   cadObjectUrl,
   CAD_RECT_TYPE_OPTIONS,
   CAD_POLYGON_TYPE_OPTIONS,
+  CAD_RECT_ATTR_FIELDS,
   fetchCadAnnotations,
   imageIndexOfBox,
   isPolygonBox,
@@ -480,7 +481,8 @@ const draft = reactive<{
 const addDialog = ref(false)
 const addIsPolygon = ref(false)
 const addType = ref('')
-const addValue = ref('')
+/** 矩形新增时除类型外的属性值（key 同 CAD_RECT_ATTR_FIELDS，留空不写入） */
+const addAttrs = ref<Record<string, string>>({})
 const pendingBox = ref<{ box: CadBox; imageIndex: number } | null>(null)
 let rectDrawing = false
 let suppressNextClick = false
@@ -623,7 +625,7 @@ function openAddDialog(
   pendingBox.value = { box, imageIndex: i }
   addIsPolygon.value = shape === 'polygon'
   addType.value = ''
-  addValue.value = ''
+  addAttrs.value = {}
   stopDraw()
   addDialog.value = true
 }
@@ -633,18 +635,35 @@ function cancelAdd() {
   pendingBox.value = null
 }
 
+/** 同类形状（矩形/多边形）下一个序号：扫描当前已显示名称里的最大数字 +1 */
+function nextShapeSeq(isPolygon: boolean): number {
+  const prefix = isPolygon ? '多边形' : '矩形'
+  const re = new RegExp(`^${prefix}-(\\d+)$`)
+  let max = 0
+  for (const r of allRows.value) {
+    if (r.isPolygon !== isPolygon) continue
+    const m = re.exec((r.name || '').trim())
+    if (m) max = Math.max(max, Number(m[1]))
+  }
+  return max + 1
+}
+
 async function submitAdd() {
   const pb = pendingBox.value
   const src = ann.value
   if (!pb || !src) return
   const { box, imageIndex } = pb
   const content: CadFormMap = { type: { type: 'radio', name: '类型', value: addType.value } }
-  if (!addIsPolygon.value) content.value = { type: 'input', name: '数值', value: addValue.value }
+  if (!addIsPolygon.value) {
+    // 矩形：按需写入非空属性（数值/上下公差/基准/螺纹代号/公差等级），留空字段不落盘
+    for (const f of CAD_RECT_ATTR_FIELDS) {
+      const v = (addAttrs.value[f.key] || '').trim()
+      if (v) content[f.key] = { type: 'input', name: f.label, value: v }
+    }
+  }
   box.content = content
-  // 名称由系统生成：形状前缀 + 该图内同类形状序号（与既有 矩形-N / 多边形-N 命名一致）
-  const imgBoxes = images.value[imageIndex]?.boxes ?? []
-  const seq = imgBoxes.filter((b) => isPolygonBox(b) === addIsPolygon.value).length + 1
-  box.name = `${addIsPolygon.value ? '多边形' : '矩形'}-${seq}`
+  // 名称由系统生成：取同类形状已显示名称里的最大序号 +1（矩形-N / 多边形-N 各自独立）
+  box.name = `${addIsPolygon.value ? '多边形' : '矩形'}-${nextShapeSeq(addIsPolygon.value)}`
   if (addIsPolygon.value) {
     if (!src.splitedAnnotationPolygon) src.splitedAnnotationPolygon = { content: [] }
     if (!src.splitedAnnotationPolygon.content) src.splitedAnnotationPolygon.content = []
@@ -1173,7 +1192,7 @@ watch(rawKey, load)
                 </span> -->
                 <span class="ann-actions">
                   <el-button link type="primary" size="small" :icon="EditIcon" @click.stop="startEdit(row)"></el-button>
-                  <el-button link type="danger" size="small" :icon="DeleteIcon" @click.stop="deleteBox(row)"></el-button>
+                  <el-button link type="danger" size="small" class="ann-del-btn" :icon="DeleteIcon" @click.stop="deleteBox(row)"></el-button>
                 </span>
               </div>
               <div v-if="row.fields.length" class="ann-line ann-line--sub">
@@ -1225,9 +1244,11 @@ watch(rawKey, load)
             </el-radio-group>
           </div>
         </el-form-item>
-        <el-form-item v-if="!addIsPolygon" label="数值">
-          <el-input v-model="addValue" placeholder="尺寸/数值（可选）" clearable />
-        </el-form-item>
+        <template v-if="!addIsPolygon">
+          <el-form-item v-for="f in CAD_RECT_ATTR_FIELDS" :key="f.key" :label="f.label">
+            <el-input v-model="addAttrs[f.key]" :placeholder="`请输入${f.label}（可选）`" clearable />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="cancelAdd">取消</el-button>
@@ -1632,6 +1653,11 @@ watch(rawKey, load)
   display: inline-flex;
   align-items: center;
   gap: 2px;
+}
+
+/* 垃圾桶图标视觉上比编辑铅笔小，单独放大一点对齐 */
+.ann-del-btn :deep(.el-icon) {
+  font-size: 1.3em;
 }
 
 /* 编辑弹框：类型选项较多，限高滚动 */

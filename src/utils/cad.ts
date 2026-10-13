@@ -398,6 +398,19 @@ export const CAD_POLYGON_TYPE_OPTIONS: Array<{ code: string; label: string }> = 
 }))
 
 /**
+ * 矩形标注除「类型」外的常见属性字段（新增时按需填写，留空的字段不写入 content）。
+ * key 与真实数据 content 的键一致，中文标签与 FIELD_LABEL 对齐。
+ */
+export const CAD_RECT_ATTR_FIELDS: Array<{ key: string; label: string }> = [
+  { key: 'value', label: '数值' },
+  { key: 'upper-deviation', label: '上公差' },
+  { key: 'lower-deviation', label: '下公差' },
+  { key: 'datum', label: '基准' },
+  { key: 'thread-designation', label: '螺纹代号' },
+  { key: 'tolerance-grade', label: '公差等级' },
+]
+
+/**
  * 写回 annotations.json（覆盖 MinIO 上的原对象）。
  * 编辑/删除后把内存里的整份 CadAnnotations 原样序列化上传。
  */
