@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   baseName,
+  boxAtPoint,
   boxCorners,
   boxCenter,
   boxDisplayName,
@@ -21,6 +22,7 @@ import {
   splitedImageName,
   type CadAnnotations,
   type CadBox,
+  type CadCorner,
   type CadPath,
 } from '@/utils/cad'
 
@@ -170,10 +172,10 @@ function resetTransform(img: CadImage) {
   transforms[img.key] = f ? { ...f } : { scale: 1, x: 0, y: 0 }
 }
 
-/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；否则→默认（不显放大镜） */
+/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；悬停到可点框→pointer；否则→默认（不显放大镜） */
 function cursorFor(key: string): string {
-  if (!panMode[key]) return 'default'
-  return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
+  if (panMode[key]) return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
+  return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'default'
 }
 
 /** 当前选中图片 */
@@ -264,6 +266,8 @@ const polyCount = computed(() => allRows.value.filter((r) => r.isPolygon).length
 
 /** 高亮某条标注（右栏点击 → 选中所属图片 + 高亮对应框 + 滚动定位） */
 const activeBox = ref<CadBox | null>(null)
+/** 当前悬停命中的标注（图上悬停预览 / 右栏行悬停反向高亮共用） */
+const hoverBox = ref<CadBox | null>(null)
 function activateRow(row: (typeof allRows.value)[number]) {
   selectedIndex.value = row.imageIndex
   activeBox.value = row.box
@@ -279,19 +283,46 @@ function focusRow(row: (typeof allRows.value)[number]) {
   }
 }
 
-/** 图上直接点某个框 → 高亮并把右栏对应行滚到可见（拖动后的松手不算点击） */
-function pickBox(img: CadImage, bi: number, box: CadBox) {
-  if (drag?.moved) return
-  const row = allRows.value.find((r) => r.imageIndex === images.value.indexOf(img) && r.index === bi)
-  selectedIndex.value = images.value.indexOf(img)
+/** 把高亮框在右栏对应行滚到可见 */
+function scrollToRow(box: CadBox) {
+  const row = allRows.value.find((r) => r.box === box)
+  if (!row) return
+  nextTick(() => {
+    document
+      .getElementById(`ann-row-${row.imageIndex}-${row.index}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  })
+}
+
+/** 切换高亮框（再次点同一个则取消） */
+function toggleActiveBox(box: CadBox) {
   activeBox.value = activeBox.value === box ? null : box
-  if (activeBox.value && row) {
-    nextTick(() => {
-      document
-        .getElementById(`ann-row-${row.imageIndex}-${row.index}`)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    })
+  if (activeBox.value) scrollToRow(activeBox.value)
+}
+
+/**
+ * 舞台层单击：按光标的自然像素坐标做命中选取，而不是依赖 SVG 元素自身的可点区域——
+ * 矩形框 fill=none 时 SVG 不会把内部当命中区，叠在上面的大剖面多边形也会抢走点击。
+ * 重叠时取面积最小者，保证嵌在剖面区里的小尺寸框能优先点中；拖动后的松手不算点击。
+ */
+function onStageClick(img: CadImage, e: MouseEvent) {
+  selectedIndex.value = images.value.indexOf(img)
+  if (drag?.moved) return
+  const pt = naturalPoint(img, e)
+  if (!pt) {
+    activeBox.value = null
+    return
   }
+  const hit = boxAtPoint(
+    boxesForImage(img).map((b) => b.box),
+    pt.x,
+    pt.y,
+  )
+  if (!hit) {
+    activeBox.value = null
+    return
+  }
+  toggleActiveBox(hit)
 }
 
 /** 一张图上某个框的多角点（像素坐标） */
@@ -317,6 +348,27 @@ function boxLabelText(box: CadBox): string {
   return [type || boxShapeLabel(box), value].filter(Boolean).join(' ')
 }
 
+/** 是否处于强调态（选中或悬停命中） */
+function isEmphasized(box: CadBox): boolean {
+  return activeBox.value === box || hoverBox.value === box
+}
+function shapeFill(box: CadBox, bi: number): string {
+  if (isEmphasized(box)) return boxColor(bi)
+  return isPolygonBox(box) && fillPolygons.value ? boxColor(bi) : 'none'
+}
+function shapeFillOpacity(box: CadBox): number {
+  if (activeBox.value === box) return 0.3
+  if (hoverBox.value === box) return 0.22
+  return isPolygonBox(box) && fillPolygons.value ? 0.14 : 0
+}
+function shapeStrokeWidth(box: CadBox): number {
+  if (activeBox.value === box) return 3
+  return hoverBox.value === box ? 2.5 : 1.5
+}
+function shapeOpacity(box: CadBox): number {
+  return activeBox.value && activeBox.value !== box && hoverBox.value !== box ? 0.4 : 1
+}
+
 /** 图片加载完成：记录真实像素尺寸，并应用整张可见的默认适配 */
 function onImgLoad(key: string, e: Event) {
   const img = e.target as HTMLImageElement
@@ -326,34 +378,48 @@ function onImgLoad(key: string, e: Event) {
 }
 
 /**
- * 光标在视口内移动（含图片以外的灰色区域）：换算出光标处的图片真实像素坐标。
- * 超出图片时 offX/offY 为负或大于图像尺寸，natX/natY 相应为负值/越界值。
+ * 光标位置换算为图片自然像素坐标（与标注 JSON 同坐标系）；超出图片时为负值/越界值。
+ * 以 .img-el 的实时矩形为基准，因此缩放/平移后依旧准确。
+ */
+function naturalPoint(img: CadImage, e: MouseEvent): CadCorner | null {
+  const stage = e.currentTarget as HTMLElement
+  const imgEl = stage.querySelector('.img-el') as HTMLImageElement | null
+  const d = dims[img.key]
+  if (!imgEl || !d) return null
+  const r = imgEl.getBoundingClientRect()
+  if (!r.width || !r.height) return null
+  return {
+    x: ((e.clientX - r.left) / r.width) * d.w,
+    y: ((e.clientY - r.top) / r.height) * d.h,
+  }
+}
+
+/**
+ * 光标在视口内移动（含图片以外的灰色区域）：换算出图片自然像素坐标，
+ * 并实时算出命中的标注（仅用于悬停预览，拖动中不干预）。
  */
 function onStageMove(img: CadImage, e: MouseEvent) {
   const stage = e.currentTarget as HTMLElement
   const stageRect = stage.getBoundingClientRect()
-  const imgEl = stage.querySelector('.img-el') as HTMLImageElement | null
-  const d = dims[img.key]
-  const cx = e.clientX - stageRect.left
-  const cy = e.clientY - stageRect.top
   hover.key = img.key
-  hover.left = cx
-  hover.top = cy
-  if (imgEl && d) {
-    const r = imgEl.getBoundingClientRect()
-    const offX = e.clientX - r.left
-    const offY = e.clientY - r.top
-    hover.natX = r.width ? Math.round((offX / r.width) * d.w) : 0
-    hover.natY = r.height ? Math.round((offY / r.height) * d.h) : 0
+  hover.left = e.clientX - stageRect.left
+  hover.top = e.clientY - stageRect.top
+  const pt = naturalPoint(img, e)
+  if (pt) {
+    hover.natX = Math.round(pt.x)
+    hover.natY = Math.round(pt.y)
+    hoverBox.value = dragging.value ? null : boxAtPoint(boxesForImage(img).map((b) => b.box), pt.x, pt.y)
   } else {
     hover.natX = 0
     hover.natY = 0
+    hoverBox.value = null
   }
   hover.show = true
 }
 
 function onImgLeave() {
   hover.show = false
+  hoverBox.value = null
 }
 
 function selectImage(i: number) {
@@ -378,6 +444,7 @@ const unassignedCount = ref(0)
  */
 async function load() {
   activeBox.value = null
+  hoverBox.value = null
   images.value = []
   ann.value = null
   selectedIndex.value = 0
@@ -530,6 +597,7 @@ watch(rawKey, load)
               :style="{ cursor: cursorFor(img.key) }"
               @wheel="onWheel(img, $event)"
               @mousedown="onStageMouseDown(img, $event)"
+              @click.stop="onStageClick(img, $event)"
               @dblclick="resetTransform(img)"
               @mousemove="onStageMove(img, $event)"
               @mouseleave="onImgLeave"
@@ -551,22 +619,25 @@ watch(rawKey, load)
                   <g
                     v-for="{ box, bi } in boxesForImage(img)"
                     :key="bi"
-                    :opacity="activeBox && activeBox !== box ? 0.4 : 1"
+                    :opacity="shapeOpacity(box)"
                   >
                     <polygon
                       class="box-shape"
-                      :class="{ 'box-shape--poly': isPolygonBox(box), 'box-shape--active': activeBox === box }"
+                      :class="{
+                        'box-shape--poly': isPolygonBox(box),
+                        'box-shape--active': activeBox === box,
+                        'box-shape--hover': hoverBox === box && activeBox !== box,
+                      }"
                       :points="pointsAttr(box)"
-                      :fill="isPolygonBox(box) && fillPolygons ? boxColor(bi) : 'none'"
-                      :fill-opacity="isPolygonBox(box) ? (activeBox === box ? 0.28 : 0.14) : 0"
+                      :fill="shapeFill(box, bi)"
+                      :fill-opacity="shapeFillOpacity(box)"
                       :stroke="boxColor(bi)"
                       :stroke-dasharray="isPolygonBox(box) ? '8 5' : undefined"
-                      :stroke-width="activeBox === box ? 3 : 1.5"
+                      :stroke-width="shapeStrokeWidth(box)"
                       vector-effect="non-scaling-stroke"
                       stroke-linejoin="round"
-                      @click.stop="pickBox(img, bi, box)"
                     />
-                    <!-- 高亮框：顶点手柄 + 居中标签，便于核对多边形顶点与剖面区域归属 -->
+                    <!-- 选中框：顶点手柄 + 居中标签（悬停只加粗描边，避免满屏标签闪动） -->
                     <template v-if="activeBox === box">
                       <circle
                         v-if="showVertices"
@@ -649,6 +720,8 @@ watch(rawKey, load)
                 'ann-item',
                 { 'ann-item--active': activeBox === row.box, 'ann-item--poly': row.isPolygon },
               ]"
+              @mouseenter="hoverBox = row.box"
+              @mouseleave="hoverBox = null"
               @click="focusRow(row)"
             >
               <div class="ann-line">
@@ -845,14 +918,9 @@ watch(rawKey, load)
   pointer-events: none;
 }
 
-/* 框本体可单击（向父级 svg 的 pointer-events:none 在子元素上重新开启） */
+/* 框本体不参与命中：命中统一由舞台层按自然坐标算（矩形 fill=none 也能点中） */
 .box-shape {
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.box-shape:hover {
-  stroke-width: 3;
+  pointer-events: none;
 }
 
 /* 高亮框中心的类型/数值标签：白描边保证在图纸上可读 */

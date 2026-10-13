@@ -271,6 +271,52 @@ export function boxShapeLabel(box: CadBox): string {
   return isPolygonBox(box) ? '多边形' : '矩形'
 }
 
+/** 射线法判断点是否落在多角点围成的区域内 */
+export function pointInCorners(x: number, y: number, corners: CadCorner[]): boolean {
+  if (corners.length < 3) return false
+  let inside = false
+  for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
+    const xi = corners[i].x
+    const yi = corners[i].y
+    const xj = corners[j].x
+    const yj = corners[j].y
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+
+/** 标注覆盖面积（平方像素）：多边形用鞋带公式，共线退化时用外接宽高 */
+export function boxArea(box: CadBox): number {
+  const pts = boxCorners(box)
+  if (pts.length < 3) return 0
+  let sum = 0
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    sum += pts[j].x * pts[i].y - pts[i].x * pts[j].y
+  }
+  const area = Math.abs(sum) / 2
+  if (area > 1e-6) return area
+  const ext = boxExtent(box)
+  return ext ? ext.w * ext.h : 0
+}
+
+/**
+ * 命中选取：返回覆盖给定点（图像自然像素坐标）的标注。
+ * 重叠时取面积最小者：多边形（剖面区域）往往覆盖整片图，不先选小框会挡住嵌在里面的尺寸框。
+ */
+export function boxAtPoint(boxes: CadBox[], x: number, y: number): CadBox | null {
+  let hit: CadBox | null = null
+  let best = Infinity
+  for (const box of boxes) {
+    if (!pointInCorners(x, y, boxCorners(box))) continue
+    const area = boxArea(box)
+    if (area < best) {
+      best = area
+      hit = box
+    }
+  }
+  return hit
+}
+
 /**
  * 类型代码 → 中文标签。实测精剪的类型值为英文代码（如 general-linear-dimension）。
  * 未收录的代码回退显示原始代码（GD&T 类代码若本就不在此表，会在界面上直接显代码）。
