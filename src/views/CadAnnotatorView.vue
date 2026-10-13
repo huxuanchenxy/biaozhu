@@ -728,9 +728,9 @@ watch(rawKey, load)
                   <span class="ann-dot" :style="{ background: row.color }"></span>
                   {{ row.name }}
                 </span>
-                <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
+                <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
                   {{ row.isPolygon ? '多边形' : '矩形' }}
-                </span>
+                </span> -->
                 <span class="ann-field">类型: {{ row.type || '—' }}</span>
               </div>
               <div class="ann-line ann-line--sub">
@@ -773,8 +773,8 @@ watch(rawKey, load)
 
 .pane-right {
   flex: 1;
-  min-width: 260px;
-  max-width: 360px;
+  min-width: 390px;
+  max-width: 540px;
 }
 
 .pane-head {
