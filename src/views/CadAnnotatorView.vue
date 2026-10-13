@@ -316,6 +316,23 @@ const visibleRows = computed(() => {
 const rectCount = computed(() => allRows.value.filter((r) => !r.isPolygon).length)
 const polyCount = computed(() => allRows.value.filter((r) => r.isPolygon).length)
 
+/** 把切图展示路径拆为「/images/ 之前的公共前缀」与「/images/.../名称 短路径」 */
+function splitCadPath(dp: string): { prefix: string; short: string } {
+  const idx = dp.lastIndexOf('/images/')
+  if (idx === -1) {
+    // 无 /images/ 段：退化为只显示文件名
+    const slash = dp.lastIndexOf('/')
+    return { prefix: slash >= 0 ? dp.slice(0, slash) : '', short: slash >= 0 ? dp.slice(slash) : dp }
+  }
+  return { prefix: dp.slice(0, idx), short: dp.slice(idx) }
+}
+/** 卡片头只显示短路径（/images/.../名称.png） */
+function shortDisplayPath(img: CadImage): string {
+  return splitCadPath(img.displayPath).short
+}
+/** 工具条显示的公共路径前缀（取第一张图 /images/ 之前的部分） */
+const imagesPathPrefix = computed(() => (images.value[0] ? splitCadPath(images.value[0].displayPath).prefix : ''))
+
 /** 高亮某条标注（右栏点击 → 选中所属图片 + 高亮对应框 + 滚动定位） */
 const activeBox = ref<CadBox | null>(null)
 /** 当前悬停命中的标注（图上悬停预览 / 右栏行悬停反向高亮共用） */
@@ -860,6 +877,10 @@ function selectImage(i: number) {
 function polyCountOf(img: CadImage): number {
   return img.boxes.filter(isPolygonBox).length
 }
+/** 一张图上的矩形个数（卡片头信息用） */
+function rectCountOf(img: CadImage): number {
+  return img.boxes.filter((b) => !isPolygonBox(b)).length
+}
 
 /** 选中的框在右栏滚动定位用（简单高亮即可，暂不做跨栏联动滚动） */
 const imageListRef = ref<HTMLElement | null>(null)
@@ -1017,6 +1038,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
+        <span v-if="imagesPathPrefix" class="toolbar-path" :title="imagesPathPrefix">{{ imagesPathPrefix }}</span>
         <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏</span>
       </div>
 
@@ -1032,9 +1054,10 @@ watch(rawKey, load)
           @click="selectImage(i)"
         >
           <div class="img-card-head">
-            <span class="img-path">{{ img.displayPath }}</span>
+            <span class="img-path" :title="img.displayPath">{{ shortDisplayPath(img) }}</span>
             <span class="img-meta">
               {{ img.boxes.length }} 个标注
+              <em v-if="rectCountOf(img)">· 矩形 {{ rectCountOf(img) }}</em>
               <em v-if="polyCountOf(img)">· 多边形 {{ polyCountOf(img) }}</em>
             </span>
             <el-button
@@ -1046,22 +1069,27 @@ watch(rawKey, load)
             >
               {{ panMode[img.key] ? '👉 拖动中' : '✋ 抓手' }}
             </el-button>
-            <el-button
-              size="small"
-              round
-              :type="drawMode[img.key] === 'rect' ? 'primary' : 'default'"
-              @click.stop="toggleDraw(img, 'rect')"
-            >
-              ▭ 矩形
-            </el-button>
-            <el-button
-              size="small"
-              round
-              :type="drawMode[img.key] === 'polygon' ? 'primary' : 'default'"
-              @click.stop="toggleDraw(img, 'polygon')"
-            >
-              ◇ 多边形
-            </el-button>
+            <span class="add-group">
+              <span class="add-group-label">＋ 新增</span>
+              <el-button
+                size="small"
+                round
+                title="在本图新增一个矩形标注"
+                :type="drawMode[img.key] === 'rect' ? 'primary' : 'default'"
+                @click.stop="toggleDraw(img, 'rect')"
+              >
+                ▭ 矩形
+              </el-button>
+              <el-button
+                size="small"
+                round
+                title="在本图新增一个多边形标注"
+                :type="drawMode[img.key] === 'polygon' ? 'primary' : 'default'"
+                @click.stop="toggleDraw(img, 'polygon')"
+              >
+                ◇ 多边形
+              </el-button>
+            </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
             <span class="draw-tip">
@@ -1421,6 +1449,23 @@ watch(rawKey, load)
   gap: 8px;
 }
 
+/* 卡片头的“新增”按钮组：用标签 + 虚线框把矩形/多边形绑定成一个新增入口 */
+.add-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 9px;
+  border: 1px dashed #a0cfff;
+  border-radius: 999px;
+  background: #f0f7ff;
+}
+.add-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #409eff;
+  white-space: nowrap;
+}
+
 /* 卡片内绘制提示条 */
 .draw-bar {
   display: flex;
@@ -1485,6 +1530,16 @@ watch(rawKey, load)
   margin-left: auto;
   font-size: 12px;
   color: #a8abb2;
+}
+
+/* 工具条左侧的公共路径前缀（/images/ 之前那段） */
+.toolbar-path {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #909399;
 }
 
 .pane-body {
