@@ -322,43 +322,41 @@ export function boxAtPoint(boxes: CadBox[], x: number, y: number): CadBox | null
 }
 
 /**
- * 权威「类型」清单：与标注工具的「类型」单选项一致，顺序照搬其面板。
- * 数据里 content.type.value 存的是英文代码，这里 code→中文名。
+ * 矩形「类型」权威清单（36 项）：与标注工具矩形类型单选项一致，code→中文名。
+ * 数据里 content.type.value 存英文代码，界面统一显示中文。
  * 注：前 21 项为尺寸/公差/符号类，后 15 项为 GD&T（几何公差）。
- *     其中螺纹/粗糙度/焊接编号/探伤/气泡/接管等代码在现有样本里未出现过，
- *     按现有命名习惯拟定；若原图数据用了不同代码串，回显会退回原代码，需据实修正。
  */
-const TYPE_OPTIONS: Array<{ code: string; label: string }> = [
+const RECT_TYPE_OPTIONS: Array<{ code: string; label: string }> = [
   { code: 'general-linear-dimension', label: '普通线性尺寸' },
   { code: 'linear-dimension-tolerance', label: '线性尺寸公差' },
   { code: 'radius-dimension', label: '半径尺寸' },
   { code: 'radius-tolerance', label: '半径尺寸公差' },
   { code: 'diameter-dimension', label: '直径尺寸' },
-  { code: 'diameter-tolerance', label: '直径尺寸纯公差' },
-  { code: 'angular-dimension', label: '角度尺寸' },
+  { code: 'diameter-tolerance', label: '直径尺寸公差' },
+  { code: 'angular-dimension', label: '纯角度尺寸' },
   { code: 'angular-tolerance', label: '角度公差' },
   { code: 'chamfer-dimension', label: '倒角尺寸' },
   { code: 'chamfer-tolerance', label: '倒角尺寸公差' },
-  { code: 'thread-spec', label: '螺纹规格标注' },
-  { code: 'thread-tolerance-param', label: '螺纹规格公差及参数' },
-  { code: 'surface-finish-symbol', label: '表面粗糙度符号及参数' },
+  { code: 'thread-designation', label: '螺纹规格标注' },
+  { code: 'thread-tolerance', label: '螺纹规格公差' },
+  { code: 'surface-roughness-symbol-and-parameters', label: '表面粗糙度符号及参数' },
   { code: 'welding-symbol', label: '焊接符号本体' },
   { code: 'datum-symbol', label: '基准代号/基准符号' },
   { code: 'datum-target', label: '基准目标' },
-  { code: 'weld-part-number', label: '焊接/部位编号' },
-  { code: 'weld-inspection-ndt', label: '焊接检验/探伤说明' },
+  { code: 'weld-location-number', label: '焊接/部位编号' },
+  { code: 'welding-inspection-ndt-notes', label: '焊接检验/探伤说明' },
   { code: 'view-section-identification', label: '视图/剖视标识' },
   { code: 'balloon-number', label: '圆圈/气泡编号' },
   { code: 'technical-requirements-block', label: '技术要求/说明块' },
   { code: 'straightness', label: '直线度' },
   { code: 'flatness', label: '平面度' },
-  { code: 'circularity', label: '圆度' },
+  { code: 'roundness', label: '圆度' },
   { code: 'cylindricity', label: '圆柱度' },
   { code: 'parallelism', label: '平行度' },
   { code: 'perpendicularity', label: '垂直度' },
   { code: 'angularity', label: '倾斜度' },
-  { code: 'position', label: '位置度' },
-  { code: 'concentricity', label: '同轴度/同心度' },
+  { code: 'position-tolerance', label: '位置度' },
+  { code: 'coaxiality', label: '同轴度/同心度' },
   { code: 'symmetry', label: '对称度' },
   { code: 'circular-runout', label: '圆跳动' },
   { code: 'total-runout', label: '全跳动' },
@@ -367,25 +365,20 @@ const TYPE_OPTIONS: Array<{ code: string; label: string }> = [
   { code: 'nozzle', label: '接管' },
 ]
 
-/**
- * 仅用于回显的补充类型：多边形剖面线/填充区等（不在「类型」单选面板内，
- * 但历史数据里会出现），以及旧代码 runout。保证这些值不会在界面上退成英文代码。
- */
-const TYPE_LABEL_EXTRA: Record<string, string> = {
-  'single-direction-diagonal-hatch-area': '单向斜线剖面区',
-  'double-direction-diagonal-hatch-area': '双向斜线剖面区',
-  'cross-hatch-area': '交叉剖面区',
-  'dot-fill-texture-area': '点状填充区',
-  'honeycomb-fill-texture-area': '蜂窝填充区',
-  'line-fill-texture-area': '线条填充区',
-  'gradient-fill-texture-area': '渐变填充区',
-  runout: '跳动',
-}
+/** 多边形「类型」权威清单（6 项）：剖面线/填充纹理区域 */
+const POLYGON_TYPE_OPTIONS: Array<{ code: string; label: string }> = [
+  { code: 'cross-hatch-area', label: '交叉剖面线区域' },
+  { code: 'single-direction-diagonal-hatch-area', label: '单向斜线剖面线区域' },
+  { code: 'dot-fill-texture-area', label: '点状填充纹理区域' },
+  { code: 'double-line-hatch-texture-area', label: '双线型剖面纹理区域' },
+  { code: 'honeycomb-fill-texture-area', label: '蜂窝状填充纹理区域' },
+  { code: 'solid-fill-area', label: '实心填充区域' },
+]
 
-/** 类型代码 → 中文标签（权威清单 + 回显补充）；未命中回退原代码 */
+/** 类型代码 → 中文标签（矩形 + 多边形全量，用于回显翻译）；未命中回退原代码 */
 const TYPE_LABEL: Record<string, string> = {
-  ...Object.fromEntries(TYPE_OPTIONS.map((o) => [o.code, o.label])),
-  ...TYPE_LABEL_EXTRA,
+  ...Object.fromEntries(RECT_TYPE_OPTIONS.map((o) => [o.code, o.label])),
+  ...Object.fromEntries(POLYGON_TYPE_OPTIONS.map((o) => [o.code, o.label])),
 }
 
 /** 把类型代码转成中文标签；未知代码原样返回 */
@@ -394,8 +387,13 @@ export function typeLabel(code: string): string {
   return TYPE_LABEL[code] || code
 }
 
-/** 编辑弹框「类型」单选框的可选项：即权威清单，顺序与标注工具一致 */
-export const CAD_TYPE_OPTIONS: Array<{ code: string; label: string }> = TYPE_OPTIONS.map((o) => ({
+/** 编辑弹框「类型」单选项：矩形一套（36 项） */
+export const CAD_RECT_TYPE_OPTIONS: Array<{ code: string; label: string }> = RECT_TYPE_OPTIONS.map((o) => ({
+  ...o,
+}))
+
+/** 编辑弹框「类型」单选项：多边形一套（6 项） */
+export const CAD_POLYGON_TYPE_OPTIONS: Array<{ code: string; label: string }> = POLYGON_TYPE_OPTIONS.map((o) => ({
   ...o,
 }))
 

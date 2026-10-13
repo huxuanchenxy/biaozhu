@@ -12,7 +12,8 @@ import {
   boxShapeLabel,
   boxVertexCount,
   cadObjectUrl,
-  CAD_TYPE_OPTIONS,
+  CAD_RECT_TYPE_OPTIONS,
+  CAD_POLYGON_TYPE_OPTIONS,
   fetchCadAnnotations,
   imageIndexOfBox,
   isPolygonBox,
@@ -26,6 +27,8 @@ import {
   type CadFormMap,
   type CadPath,
 } from '@/utils/cad'
+import EditIcon from '@/icons/EditIcon.vue'
+import DeleteIcon from '@/icons/DeleteIcon.vue'
 
 /**
  * CAD 图纸标注页：/cad/<bucket>/<任务目录>/annotations/<任务编号>/annotations.json
@@ -320,12 +323,14 @@ const editName = ref('')
 const editType = ref('')
 /** 当前编辑的框是否自带「类型」字段（无类型的框不展示类型单选） */
 const editHasType = ref(false)
+/** 当前编辑的框是否为多边形（决定类型单选项取哪套清单） */
+const editIsPolygon = ref(false)
 /** 除类型外的可编辑文本字段（由 box.content 动态得出） */
 const editFields = ref<Array<{ key: string; label: string; value: string }>>([])
 
-/** 类型选项：已知代码 + 当前值（若未收录则追加一项，避免选中项不显示） */
+/** 类型选项：按形状选用矩形/多边形清单 + 当前值（若未收录则追加一项，避免选中项不显示） */
 const typeOptions = computed(() => {
-  const opts = [...CAD_TYPE_OPTIONS]
+  const opts = [...(editIsPolygon.value ? CAD_POLYGON_TYPE_OPTIONS : CAD_RECT_TYPE_OPTIONS)]
   const cur = editType.value
   if (cur && !opts.some((o) => o.code === cur)) opts.unshift({ code: cur, label: `${cur}（未收录）` })
   return opts
@@ -337,6 +342,7 @@ function startEdit(row: AnnRow) {
   editName.value = box.name ?? ''
   editType.value = ''
   editHasType.value = false
+  editIsPolygon.value = isPolygonBox(box)
   editFields.value = []
   const content = box.content
   if (content && !Array.isArray(content)) {
@@ -382,7 +388,7 @@ async function deleteBox(row: AnnRow) {
     await ElMessageBox.confirm(
       `确定删除标注「${row.name}」？此操作会写回并覆盖原 annotations.json，不可恢复。`,
       '删除标注',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
     )
   } catch {
     return
@@ -846,8 +852,8 @@ watch(rawKey, load)
                   {{ row.isPolygon ? '多边形' : '矩形' }}
                 </span> -->
                 <span class="ann-actions">
-                  <el-button link type="primary" size="small" @click.stop="startEdit(row)">编辑</el-button>
-                  <el-button link type="danger" size="small" @click.stop="deleteBox(row)">删除</el-button>
+                  <el-button link type="primary" size="small" :icon="EditIcon" @click.stop="startEdit(row)"></el-button>
+                  <el-button link type="danger" size="small" :icon="DeleteIcon" @click.stop="deleteBox(row)"></el-button>
                 </span>
               </div>
               <div v-if="row.fields.length" class="ann-line ann-line--sub">
@@ -1110,7 +1116,7 @@ watch(rawKey, load)
 
 /* 右：标注列表 */
 .ann-list {
-  padding: 8px 0;
+  padding: 0 0 8px;
 }
 
 .ann-warn {
@@ -1163,7 +1169,7 @@ watch(rawKey, load)
 .ann-group {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 10;
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
