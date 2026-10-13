@@ -471,10 +471,8 @@ async function load() {
     ])
     ann.value = data
 
-    // 只保留 png，按文件名自然排序
-    const pngKeys = objectKeys
-      .filter((k) => /\.png$/i.test(k))
-      .sort((a, b) => baseName(a).localeCompare(baseName(b), 'zh-CN', { numeric: true }))
+    // 只保留 png，保持接口（ListObjectsV2）返回的原始顺序，不再按文件名重排
+    const pngKeys = objectKeys.filter((k) => /\.png$/i.test(k))
 
     // 文件名 → 对象 key，供按 splited_image 归属匹配
     const byName = new Map<string, string>()
