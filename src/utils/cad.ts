@@ -134,7 +134,10 @@ export async function listCadObjects(prefix: string): Promise<string[]> {
 
 /** 读取并解析 annotations.json */
 export async function fetchCadAnnotations(key: string): Promise<CadAnnotations> {
-  const res = await fetch(cadObjectUrl(key))
+  // 加时间戳 + no-store：该路径走签名服务直读 MinIO，响应带可缓存头（ETag/Last-Modified 但无 no-store），
+  // 浏览器会缓存旧 JSON，导致编辑写回后刷新仍显示原样。强制绕开缓存取最新。
+  const url = `${cadObjectUrl(key)}?t=${Date.now()}`
+  const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`读取标注失败 HTTP ${res.status}：${key}`)
   return (await res.json()) as CadAnnotations
 }

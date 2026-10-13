@@ -845,20 +845,13 @@ watch(rawKey, load)
                 <!-- <span :class="['ann-badge', row.isPolygon ? 'ann-badge--poly' : '']">
                   {{ row.isPolygon ? '多边形' : '矩形' }}
                 </span> -->
-                <span class="ann-field">
-                  <template v-if="row.fields[0]">
-                    <span class="ann-key">{{ row.fields[0].label }}</span
-                    ><span class="ann-sep">: </span><span class="ann-val">{{ row.fields[0].value }}</span>
-                  </template>
-                  <template v-else>{{ row.name }}</template>
-                </span>
                 <span class="ann-actions">
                   <el-button link type="primary" size="small" @click.stop="startEdit(row)">编辑</el-button>
                   <el-button link type="danger" size="small" @click.stop="deleteBox(row)">删除</el-button>
                 </span>
               </div>
-              <div v-if="row.fields.length > 1" class="ann-line ann-line--sub">
-                <span v-for="f in row.fields.slice(1)" :key="f.label" class="ann-field">
+              <div v-if="row.fields.length" class="ann-line ann-line--sub">
+                <span v-for="f in row.fields" :key="f.label" class="ann-field">
                   <span class="ann-key">{{ f.label }}</span
                   ><span class="ann-sep">: </span><span class="ann-val">{{ f.value }}</span>
                 </span>
