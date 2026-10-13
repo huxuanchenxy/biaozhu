@@ -1131,6 +1131,7 @@ watch(rawKey, load)
   font-size: 13px;
   cursor: pointer;
   border-left: 3px solid transparent;
+  border-bottom: 1px solid #eef0f3;
 }
 
 /* 多边形行用淡蓝底 + 虚线左边，与矩形区分 */
