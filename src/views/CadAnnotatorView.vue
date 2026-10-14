@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -166,6 +166,26 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     return
   }
   if (drawMode[img.key] === 'polygon') return // 多边形顶点在 click 里累加
+  // 几何编辑模式：先命中当前选中框的手柄→缩放；否则命中框体→平移（均按自然坐标算）
+  if (editMode[img.key]) {
+    const pt = naturalPoint(img, e)
+    if (!pt) return
+    const ab = activeBox.value
+    if (ab && img.boxes.includes(ab)) {
+      const vi = vertexIndexAt(img, ab, pt)
+      if (vi >= 0) {
+        startVertexDrag(ab, img, vi, e, pt)
+        return
+      }
+    }
+    const hit = boxAtPoint(
+      boxesForImage(img).map((b) => b.box),
+      pt.x,
+      pt.y,
+    )
+    if (hit) startShapeDrag(hit, img, e, pt)
+    return
+  }
   if (!panMode[img.key]) return
   const t = tf(img.key)
   drag = { key: img.key, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y, moved: false }
@@ -173,6 +193,10 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
   e.preventDefault()
 }
 function onWindowMouseMove(e: MouseEvent) {
+  if (geomDrag) {
+    geomDragMove(e)
+    return
+  }
   if (rectDrawing && draft.shape === 'rect') {
     const pt = naturalPointAt(draft.imageIndex, e.clientX, e.clientY)
     if (pt) {
@@ -190,6 +214,11 @@ function onWindowMouseMove(e: MouseEvent) {
   t.y = drag.oy + dy
 }
 function onWindowMouseUp() {
+  if (geomDrag) {
+    geomDrag = null
+    geomDragging.value = false
+    return
+  }
   if (rectDrawing) {
     rectDrawing = false
     suppressNextClick = true
@@ -206,10 +235,12 @@ function resetTransform(img: CadImage) {
   transforms[img.key] = f ? { ...f } : { scale: 1, x: 0, y: 0 }
 }
 
-/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；悬停到可点框→pointer；否则→默认（不显放大镜） */
+/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；编辑模式下命中框→move；否则→默认（不显放大镜） */
 function cursorFor(key: string): string {
   if (drawMode[key]) return 'crosshair'
+  if (geomDragging.value) return 'grabbing'
   if (panMode[key]) return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
+  if (editMode[key]) return hover.show && hover.key === key && hoverBox.value ? 'move' : 'default'
   return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'default'
 }
 
@@ -475,16 +506,18 @@ async function deleteBox(row: AnnRow) {
   await persist('已删除标注')
 }
 
-/** 把当前内存里的整份 annotations 写回 MinIO */
-async function persist(okMsg: string) {
+/** 把当前内存里的整份 annotations 写回 MinIO；返回是否保存成功 */
+async function persist(okMsg: string): Promise<boolean> {
   const p = cadPath.value
-  if (!p || !ann.value) return
+  if (!p || !ann.value) return false
   saving.value = true
   try {
     await saveCadAnnotations(p.annotationsKey, ann.value)
     ElMessage.success(okMsg)
+    return true
   } catch (e: any) {
     ElMessage.error(`保存失败：${e?.message ?? '未知错误'}`)
+    return false
   } finally {
     saving.value = false
   }
@@ -537,6 +570,14 @@ function toggleDraw(img: CadImage, shape: DrawShape) {
     stopDraw()
     return
   }
+  // 绘制与几何编辑互斥：开始绘制前静默放弃未保存的几何修改并退出编辑
+  if (editMode[key]) {
+    restoreGeometry()
+    geomSnapshot = null
+    editDirty.value = false
+    editMode[key] = false
+    activeBox.value = null
+  }
   stopDraw()
   drawMode[key] = shape
   panMode[key] = false
@@ -553,6 +594,233 @@ function stopDraw() {
   draft.imageIndex = -1
   draft.points = []
   rectDrawing = false
+}
+
+/* ------------------------------------------------------------------
+ * 几何编辑：「进入编辑」后可拖动标注框整体平移，拖动顶点改变大小
+ *  （矩形四角缩放，多边形逐顶点变形）；「保存编辑」写回 MinIO，
+ *  取消/Esc 用进入时的快照回滚。
+ * ------------------------------------------------------------------ */
+const editMode = reactive<Record<string, boolean>>({})
+/** 进入编辑时的几何快照：按框对象引用记录几何字段，回滚时就地还原（不换引用，不依赖 uuid） */
+interface GeomSnap {
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  rotation?: number
+  points?: number[]
+}
+let geomSnapshot: Map<CadBox, GeomSnap> | null = null
+const editDirty = ref(false)
+
+/** 收集全部标注（精剪矩形 + 多边形，含未归属的）的几何快照 */
+function snapshotGeometry(): Map<CadBox, GeomSnap> {
+  const m = new Map<CadBox, GeomSnap>()
+  const pool: CadBox[] = [
+    ...(toRaw(ann.value)?.splitedAnnotation?.content ?? []),
+    ...(toRaw(ann.value)?.splitedAnnotationPolygon?.content ?? []),
+  ]
+  for (const b of pool) {
+    m.set(toRaw(b) as CadBox, {
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      rotation: b.rotation,
+      points: b.points ? [...b.points] : undefined,
+    })
+  }
+  return m
+}
+
+/** 按快照就地还原几何：img.boxes 与 ann 源数组共享同一框引用，两边同时恢复 */
+function restoreGeometry() {
+  if (!geomSnapshot) return
+  for (const [b, s] of geomSnapshot) {
+    b.x = s.x
+    b.y = s.y
+    b.width = s.width
+    b.height = s.height
+    b.rotation = s.rotation
+    if (s.points && b.points) b.points.splice(0, b.points.length, ...s.points)
+    else b.points = s.points ? [...s.points] : s.points
+  }
+}
+
+/** 进入/退出某图的几何编辑：全局互斥，一次只编辑一张图 */
+function toggleEdit(img: CadImage) {
+  const key = img.key
+  if (editMode[key]) {
+    cancelEdit()
+    return
+  }
+  stopDraw()
+  for (const k of Object.keys(editMode)) editMode[k] = false
+  for (const k of Object.keys(panMode)) panMode[k] = false
+  geomSnapshot = ann.value ? snapshotGeometry() : null
+  editDirty.value = false
+  editMode[key] = true
+  selectedIndex.value = images.value.indexOf(img)
+  activeBox.value = null
+}
+
+/** 保存：把修改后的整份 annotations 写回 MinIO，成功后退出编辑 */
+async function saveEdit() {
+  if (!editDirty.value) {
+    exitEdit()
+    return
+  }
+  const ok = await persist('已保存编辑')
+  if (ok) exitEdit()
+}
+
+/** 取消：有未保存修改时二次确认，确认后就地还原几何快照 */
+async function cancelEdit() {
+  if (editDirty.value) {
+    try {
+      await ElMessageBox.confirm('有未保存的几何修改，放弃并退出编辑？', '退出编辑', {
+        type: 'warning',
+        confirmButtonText: '放弃修改',
+        cancelButtonText: '继续编辑',
+      })
+    } catch {
+      return
+    }
+  }
+  restoreGeometry()
+  activeBox.value = null
+  hoverBox.value = null
+  exitEdit()
+}
+
+function exitEdit() {
+  for (const k of Object.keys(editMode)) editMode[k] = false
+  geomSnapshot = null
+  editDirty.value = false
+  geomDrag = null
+  geomDragging.value = false
+}
+
+/* ---- 拖动/缩放交互 ---- */
+type GeomCorners = Array<{ x: number; y: number }>
+let geomDrag: {
+  key: string
+  box: CadBox
+  mode: 'move' | 'resize'
+  vi: number
+  sx: number
+  sy: number
+  ox: number
+  oy: number
+  ow: number
+  oh: number
+  orig: GeomCorners
+  moved: boolean
+} | null = null
+const geomDragging = ref(false)
+
+/** 某角点/顶点在自然坐标下的命中索引（手柄抓取半径内），未命中返回 -1 */
+function vertexIndexAt(img: CadImage, box: CadBox, pt: CadCorner): number {
+  const r = vertexRadius(img.key) * 2.6
+  const cs = cornersOf(box)
+  for (let i = 0; i < cs.length; i++) {
+    const dx = pt.x - cs[i].x
+    const dy = pt.y - cs[i].y
+    if (dx * dx + dy * dy <= r * r) return i
+  }
+  return -1
+}
+
+/** 按下框体：整体平移（pt 为阶段层已算好的自然坐标） */
+function startShapeDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorner) {
+  if (!editMode[img.key]) return
+  e.preventDefault()
+  suppressNextClick = true
+  activeBox.value = box
+  geomDrag = {
+    key: img.key,
+    box,
+    mode: 'move',
+    vi: -1,
+    sx: pt.x,
+    sy: pt.y,
+    ox: Number(box.x) || 0,
+    oy: Number(box.y) || 0,
+    ow: Number(box.width) || 0,
+    oh: Number(box.height) || 0,
+    orig: cornersOf(box).map((c) => ({ ...c })),
+    moved: false,
+  }
+  geomDragging.value = true
+}
+
+/** 按下顶点手柄：矩形四角缩放 / 多边形单顶点变形 */
+function startVertexDrag(box: CadBox, img: CadImage, vi: number, e: MouseEvent, pt: CadCorner) {
+  if (!editMode[img.key] || activeBox.value !== box) return
+  e.preventDefault()
+  suppressNextClick = true
+  geomDrag = {
+    key: img.key,
+    box,
+    mode: 'resize',
+    vi,
+    sx: pt.x,
+    sy: pt.y,
+    ox: Number(box.x) || 0,
+    oy: Number(box.y) || 0,
+    ow: Number(box.width) || 0,
+    oh: Number(box.height) || 0,
+    orig: cornersOf(box).map((c) => ({ ...c })),
+    moved: false,
+  }
+  geomDragging.value = true
+}
+
+function geomDragMove(e: MouseEvent) {
+  const g = geomDrag
+  if (!g) return
+  const i = images.value.findIndex((im) => im.key === g.key)
+  const pt = naturalPointAt(i, e.clientX, e.clientY)
+  if (!pt) return
+  const dx = pt.x - g.sx
+  const dy = pt.y - g.sy
+  const box = g.box
+  const rotated = !isPolygonBox(box) && Number(box.rotation) || 0
+  // 带 rotation 的矩形仅支持平移，手柄拖拽（resize）不生效
+  if (g.mode === 'resize' && rotated) return
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    g.moved = true
+    editDirty.value = true
+  }
+  if (g.mode === 'move') {
+    box.x = g.ox + dx
+    box.y = g.oy + dy
+    if (isPolygonBox(box)) {
+      const pts = box.points ?? []
+      for (let k = 0; k + 1 < pts.length; k += 2) {
+        pts[k] = g.orig[k / 2].x + dx
+        pts[k + 1] = g.orig[k / 2].y + dy
+      }
+    }
+  } else if (isPolygonBox(box)) {
+    const pts = box.points ?? []
+    pts[g.vi * 2] = pt.x
+    pts[g.vi * 2 + 1] = pt.y
+    const xs = pts.filter((_, k) => k % 2 === 0)
+    const ys = pts.filter((_, k) => k % 2 === 1)
+    box.x = Math.min(...xs)
+    box.y = Math.min(...ys)
+    box.width = Math.max(...xs) - box.x
+    box.height = Math.max(...ys) - box.y
+  } else if (g.orig.length === 4) {
+    // 轴对齐矩形：对锚角点不动，拖动当前角点缩放
+    const fixed = g.orig[(g.vi + 2) % 4]
+    box.x = Math.min(fixed.x, pt.x)
+    box.y = Math.min(fixed.y, pt.y)
+    box.width = Math.max(1, Math.abs(pt.x - fixed.x))
+    box.height = Math.max(1, Math.abs(pt.y - fixed.y))
+  }
 }
 
 function onStageDblClick(img: CadImage, e: MouseEvent) {
@@ -848,7 +1116,7 @@ function onStageMove(img: CadImage, e: MouseEvent) {
   if (pt) {
     hover.natX = Math.round(pt.x)
     hover.natY = Math.round(pt.y)
-    hoverBox.value = dragging.value ? null : boxAtPoint(boxesForImage(img).map((b) => b.box), pt.x, pt.y)
+    hoverBox.value = dragging.value || geomDragging.value ? null : boxAtPoint(boxesForImage(img).map((b) => b.box), pt.x, pt.y)
   } else {
     hover.natX = 0
     hover.natY = 0
@@ -901,6 +1169,8 @@ async function load() {
   for (const k of Object.keys(dims)) delete dims[k]
   drag = null
   dragging.value = false
+  geomDrag = null
+  geomDragging.value = false
   hover.show = false
   const path = cadPath.value
   if (!path) {
@@ -976,6 +1246,11 @@ function onWindowKeyDown(e: KeyboardEvent) {
   // Esc：绘制中（矩形/多边形）取消退出；弹框打开时交给弹框自身处理
   if (e.key === 'Escape') {
     if (editDialog.value || addDialog.value) return
+    // 编辑模式：Esc 退出（有未保存修改时弹确认）
+    if (Object.values(editMode).some(Boolean)) {
+      cancelEdit()
+      return
+    }
     const drawing = draft.shape !== '' || Object.values(drawMode).some((m) => m !== '')
     if (drawing) {
       e.preventDefault()
@@ -1033,7 +1308,7 @@ watch(rawKey, load)
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
         <span v-if="imagesPathPrefix" class="toolbar-path" :title="imagesPathPrefix">{{ imagesPathPrefix }}</span>
-        <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏</span>
+        <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏・「进入编辑」可拖动/改大小</span>
       </div>
 
       <div ref="imageListRef" v-loading="loading" class="pane-body img-list">
@@ -1083,6 +1358,26 @@ watch(rawKey, load)
               >
                 ◇ 多边形
               </el-button>
+            </span>
+            <span class="add-group edit-group">
+              <span class="add-group-label">✎ 编辑</span>
+              <el-button
+                size="small"
+                round
+                :disabled="!!drawMode[img.key]"
+                :loading="editMode[img.key] && saving"
+                :type="editMode[img.key] ? 'primary' : 'default'"
+                :title="editMode[img.key] ? '保存本次几何修改并写回 MinIO' : '进入编辑：可拖动标注框、拖角点改大小'"
+                @click.stop="editMode[img.key] ? saveEdit() : toggleEdit(img)"
+              >
+                {{ editMode[img.key] ? '💾 保存编辑' : '✎ 进入编辑' }}
+              </el-button>
+              <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
+            </span>
+          </div>
+          <div v-if="editMode[img.key]" class="draw-bar edit-bar">
+            <span class="draw-tip">
+              编辑模式：拖动框体平移；单击选中后拖动手柄可改变矩形大小 / 多边形顶点（Esc 或「取消」放弃修改）
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
@@ -1149,15 +1444,16 @@ watch(rawKey, load)
                       vector-effect="non-scaling-stroke"
                       stroke-linejoin="round"
                     />
-                    <!-- 选中框：仅顶点手柄（不再显示任何值标签） -->
+                    <!-- 选中框：顶点手柄（编辑模式下常显且可拖拽改大小） -->
                     <template v-if="activeBox === box">
                       <circle
-                        v-if="showVertices"
+                        v-if="showVertices || editMode[img.key]"
                         v-for="(c, ci) in cornersOf(box)"
                         :key="`v-${ci}`"
+                        :class="['vertex-handle', { 'vertex-handle--drag': editMode[img.key] }]"
                         :cx="c.x"
                         :cy="c.y"
-                        :r="vertexRadius(img.key)"
+                        :r="vertexRadius(img.key) * (editMode[img.key] ? 1.4 : 1)"
                         :fill="boxColor(bi)"
                         stroke="#fff"
                         :stroke-width="1.5"
@@ -1459,6 +1755,14 @@ watch(rawKey, load)
 .add-group .el-button + .el-button {
   margin-left: 0;
 }
+/* 卡片头的“编辑”按钮组：与新增同款胶囊，橙色系区分职责 */
+.edit-group {
+  border-color: #f3cfa0;
+  background: #fdf6ec;
+}
+.edit-group .add-group-label {
+  color: #e6a23c;
+}
 .add-group-label {
   font-size: 12px;
   font-weight: 600;
@@ -1480,6 +1784,21 @@ watch(rawKey, load)
   flex: 1;
   min-width: 0;
   color: #409eff;
+}
+
+/* 几何编辑提示条：与绘制条同构，橙色系呼应编辑按钮组 */
+.edit-bar {
+  background: #fdf6ec;
+  border-bottom-color: #faecd8;
+}
+.edit-bar .draw-tip {
+  color: #b88230;
+}
+
+/* 编辑模式下可拖拽的顶点手柄（叠加层整体 pointer-events:none，仅作视觉提示） */
+.vertex-handle--drag {
+  stroke: #303133;
+  stroke-width: 2;
 }
 
 /* 新增弹框：形状旁的说明 */
