@@ -1338,7 +1338,7 @@ watch(rawKey, load)
     </section>
 
     <!-- 标注编辑弹框：类型单选、其余文本可编辑；多边形通常只有类型 -->
-    <el-dialog v-model="editDialog" title="编辑标注" width="560px" top="8vh" append-to-body>
+    <el-dialog v-model="editDialog" title="编辑标注" width="880px" top="8vh" append-to-body>
       <el-form label-width="88px">
         <el-form-item label="名称">
           <el-input :model-value="editBox?.name || ''" disabled />
@@ -1350,9 +1350,11 @@ watch(rawKey, load)
             </el-radio-group>
           </div>
         </el-form-item>
-        <el-form-item v-for="ef in editFields" :key="ef.key" :label="ef.label">
-          <el-input v-model="ef.value" clearable />
-        </el-form-item>
+        <div v-if="editFields.length" class="attr-grid">
+          <el-form-item v-for="ef in editFields" :key="ef.key" :label="ef.label">
+            <el-input v-model="ef.value" clearable />
+          </el-form-item>
+        </div>
         <div v-if="!editHasType && !editFields.length" class="edit-empty">该标注无可编辑属性</div>
       </el-form>
       <template #footer>
@@ -1362,7 +1364,7 @@ watch(rawKey, load)
     </el-dialog>
 
     <!-- 新增标注弹框：几何已在图上绘制，此处选类型(+数值)并写回 -->
-    <el-dialog v-model="addDialog" title="新增标注" width="560px" top="8vh" append-to-body>
+    <el-dialog v-model="addDialog" title="新增标注" width="880px" top="8vh" append-to-body>
       <el-form label-width="88px">
         <el-form-item label="形状">
           <el-tag :type="addIsPolygon ? 'warning' : 'primary'">{{ addIsPolygon ? '多边形' : '矩形' }}</el-tag>
@@ -1374,11 +1376,11 @@ watch(rawKey, load)
             </el-radio-group>
           </div>
         </el-form-item>
-        <template v-if="!addIsPolygon">
+        <div v-if="!addIsPolygon" class="attr-grid">
           <el-form-item v-for="f in CAD_RECT_ATTR_FIELDS" :key="f.key" :label="f.label">
             <el-input v-model="addAttrs[f.key]" :placeholder="`请输入${f.label}（可选）`" clearable />
           </el-form-item>
-        </template>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="cancelAdd">取消</el-button>
@@ -1452,6 +1454,10 @@ watch(rawKey, load)
   border: 1px dashed #a0cfff;
   border-radius: 999px;
   background: #f0f7ff;
+}
+/* el-button 相邻默认自带 12px margin-left，与 gap 叠加会过大，归零后仅由 gap 控制间距 */
+.add-group .el-button + .el-button {
+  margin-left: 0;
 }
 .add-group-label {
   font-size: 12px;
@@ -1841,16 +1847,35 @@ watch(rawKey, load)
   font-size: 1.3em;
 }
 
-/* 编辑弹框：类型选项较多，限高滚动 */
+/* 类型选项较多：不限高、不内部滚动，用两列网格全部展开，避免选到后面的类型要滚动才看到 */
 .type-radios {
   width: 100%;
-  max-height: 260px;
-  overflow-y: auto;
-  padding-right: 8px;
+}
+
+/* 数值等属性字段两列排布 */
+.attr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+
+.type-radios :deep(.el-radio-group) {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px 12px;
+  width: 100%;
 }
 
 .type-radios :deep(.el-radio) {
-  margin-right: 16px;
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+}
+
+.type-radios :deep(.el-radio__label) {
+  white-space: normal;
+  line-height: 1.4;
 }
 
 .edit-empty {
