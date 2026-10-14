@@ -380,7 +380,6 @@ type AnnRow = (typeof allRows.value)[number]
 const saving = ref(false)
 const editDialog = ref(false)
 const editBox = ref<CadBox | null>(null)
-const editName = ref('')
 const editType = ref('')
 /** 当前编辑的框是否自带「类型」字段（无类型的框不展示类型单选） */
 const editHasType = ref(false)
@@ -400,7 +399,6 @@ const typeOptions = computed(() => {
 function startEdit(row: AnnRow) {
   const box = row.box
   editBox.value = box
-  editName.value = box.name ?? ''
   editType.value = ''
   editHasType.value = false
   editIsPolygon.value = isPolygonBox(box)
@@ -435,10 +433,6 @@ async function submitEdit() {
       const f = map[ef.key]
       if (f) f.value = ef.value
     }
-    // 名称
-    const nm = editName.value.trim()
-    if (nm) box.name = nm
-    else if (box.name != null) box.name = ''
   }
   editDialog.value = false
   await persist('已保存修改')
@@ -1347,7 +1341,7 @@ watch(rawKey, load)
     <el-dialog v-model="editDialog" title="编辑标注" width="560px" top="8vh" append-to-body>
       <el-form label-width="88px">
         <el-form-item label="名称">
-          <el-input v-model="editName" placeholder="展示名称（可选）" clearable />
+          <el-input :model-value="editBox?.name || ''" disabled />
         </el-form-item>
         <el-form-item v-if="editHasType" label="类型">
           <div class="type-radios">
