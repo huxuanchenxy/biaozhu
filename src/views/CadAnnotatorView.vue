@@ -1291,7 +1291,10 @@ watch(rawKey, load)
     <!-- 左：切图列表 + 标注框叠加 -->
     <section class="pane pane-left">
       <header class="pane-head">
-        <span class="pane-title">小图片切割</span>
+        <span class="pane-head-l">
+          <span class="pane-title">小图片切割</span>
+          <span v-if="imagesPathPrefix" class="toolbar-path" :title="imagesPathPrefix">{{ imagesPathPrefix }}</span>
+        </span>
         <span v-if="loading" class="hint">加载中…</span>
         <span v-else class="hint">{{ images.length }} 张切图</span>
       </header>
@@ -1307,7 +1310,6 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
-        <span v-if="imagesPathPrefix" class="toolbar-path" :title="imagesPathPrefix">{{ imagesPathPrefix }}</span>
         <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏・「进入编辑」可拖动/改大小</span>
       </div>
 
@@ -1710,7 +1712,7 @@ watch(rawKey, load)
 
 .pane-right {
   flex: 1;
-  min-width: 390px;
+  min-width: 350px;
   max-width: 540px;
 }
 
@@ -1739,6 +1741,8 @@ watch(rawKey, load)
   display: flex;
   align-items: baseline;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 /* 卡片头的“新增”按钮组：用标签 + 虚线框把矩形/多边形绑定成一个新增入口 */
@@ -1853,7 +1857,8 @@ watch(rawKey, load)
 
 /* 工具条左侧的公共路径前缀（/images/ 之前那段） */
 .toolbar-path {
-  max-width: 60%;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
