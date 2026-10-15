@@ -395,14 +395,16 @@ function shapeSeqOfName(name: string): number {
 const visibleRows = computed(() => {
   const bySeq = (a: (typeof allRows.value)[number], b: (typeof allRows.value)[number]) =>
     shapeSeqOfName(a.name) - shapeSeqOfName(b.name)
-  // 组内按名称序号排序：新标注序号最大→排在最后；并按组内位置重新编号 no
+  // 组内先按图片顺序（images 保持 list 接口返回的原始顺序），同图内再按名称序号；并按组内位置重新编号 no
+  const byImgThenSeq = (a: (typeof allRows.value)[number], b: (typeof allRows.value)[number]) =>
+    a.imageIndex - b.imageIndex || bySeq(a, b)
   const rectRows = allRows.value
     .filter((r) => !r.isPolygon)
-    .sort(bySeq)
+    .sort(byImgThenSeq)
     .map((r, i) => ({ ...r, no: i + 1 }))
   const polyRows = allRows.value
     .filter((r) => r.isPolygon)
-    .sort(bySeq)
+    .sort(byImgThenSeq)
     .map((r, i) => ({ ...r, no: i + 1 }))
   if (shapeFilter.value === 'rect') return rectRows
   if (shapeFilter.value === 'polygon') return polyRows
@@ -746,6 +748,8 @@ async function saveEdit() {
   const ok = await persist('已保存编辑')
   if (ok) exitEdit()
 }
+// 模板里「✎ 进入编辑」按钮组当前被注释隐藏，这里保留函数引用以免 noUnusedLocals 报错；恢复按钮时可删除下一行
+void [toggleEdit, saveEdit]
 
 /** 取消：有未保存修改时二次确认，确认后就地还原几何快照 */
 async function cancelEdit() {
@@ -1434,7 +1438,7 @@ watch(rawKey, load)
                 ◇ 多边形
               </el-button>
             </span>
-            <!-- <span class="add-group edit-group">
+            <span class="add-group edit-group">
               <span class="add-group-label">✎ 编辑</span>
               <el-button
                 size="small"
@@ -1448,7 +1452,7 @@ watch(rawKey, load)
                 {{ editMode[img.key] ? '💾 保存编辑' : '✎ 进入编辑' }}
               </el-button>
               <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
-            </span> -->
+            </span>
           </div>
           <div v-if="editMode[img.key]" class="draw-bar edit-bar">
             <span class="draw-tip">
@@ -1687,7 +1691,7 @@ watch(rawKey, load)
                     <span class="ann-dot" :style="{ background: row.color }"></span>
                     {{ row.name }}
                   </span>
-                  <span class="ann-img-hint">{{ row.imageName }}</span>
+                  <span class="ann-img-hint" :title="row.imageName">📄 {{ row.imageName }}</span>
                 </div>
                 <div v-if="row.fields.length" class="ann-line ann-line--sub">
                   <span v-for="f in row.fields" :key="f.label" class="ann-field">
@@ -2208,10 +2212,19 @@ watch(rawKey, load)
   text-align: right;
 }
 
-/* 按形状分组后，行内保留所属图片名以便回溯 */
+/* 按形状分组后，行内保留所属图片名以便回溯：做成浅蓝胶囊徽标，一眼可辨 */
 .ann-img-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 60%;
+  padding: 1px 8px;
   font-size: 12px;
-  color: #a8abb2;
+  font-weight: 600;
+  color: #337ecc;
+  background: #eef4fd;
+  border: 1px solid #cfe3f8;
+  border-radius: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
