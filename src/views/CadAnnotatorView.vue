@@ -722,7 +722,7 @@ const geomDragging = ref(false)
 
 /** 某角点/顶点在自然坐标下的命中索引（手柄抓取半径内），未命中返回 -1 */
 function vertexIndexAt(img: CadImage, box: CadBox, pt: CadCorner): number {
-  const r = vertexRadius(img.key) * 2.6
+  const r = vertexRadius(img.key) * 3.4
   const cs = cornersOf(box)
   for (let i = 0; i < cs.length; i++) {
     const dx = pt.x - cs[i].x
@@ -1455,7 +1455,7 @@ watch(rawKey, load)
                         :class="['vertex-handle', { 'vertex-handle--drag': editMode[img.key] }]"
                         :cx="c.x"
                         :cy="c.y"
-                        :r="vertexRadius(img.key) * (editMode[img.key] ? 1.4 : 1)"
+                        :r="vertexRadius(img.key) * (editMode[img.key] ? 2.4 : 1)"
                         :fill="boxColor(bi)"
                         stroke="#fff"
                         :stroke-width="1.5"
