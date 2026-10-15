@@ -2105,6 +2105,8 @@ watch(rawKey, load)
 /* 右：标注列表 */
 .ann-list {
   padding: 0 0 8px;
+  /* 预留吸顶分组头的高度：scrollIntoView 遇顶行时停在头下方，不被盖住 */
+  scroll-padding-top: 40px;
 }
 
 .ann-warn {
