@@ -1361,7 +1361,7 @@ watch(rawKey, load)
                 ◇ 多边形
               </el-button>
             </span>
-            <span class="add-group edit-group">
+            <!-- <span class="add-group edit-group">
               <span class="add-group-label">✎ 编辑</span>
               <el-button
                 size="small"
@@ -1375,7 +1375,7 @@ watch(rawKey, load)
                 {{ editMode[img.key] ? '💾 保存编辑' : '✎ 进入编辑' }}
               </el-button>
               <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
-            </span>
+            </span> -->
           </div>
           <div v-if="editMode[img.key]" class="draw-bar edit-bar">
             <span class="draw-tip">
