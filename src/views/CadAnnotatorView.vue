@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   baseName,
   boxAtPoint,
+  boxCenter,
   boxCorners,
   boxDisplayName,
   boxExtent,
@@ -118,6 +119,68 @@ function wrapStyle(key: string) {
   return t ? { transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})` } : {}
 }
 
+/* ---- 视图平移动画：把视口外的选中框缓动到视口中央（不改变缩放） ---- */
+const panAnims = new Map<string, number>()
+function cancelPan(key: string) {
+  const id = panAnims.get(key)
+  if (id != null) {
+    cancelAnimationFrame(id)
+    panAnims.delete(key)
+  }
+}
+function panTo(key: string, x: number, y: number, animate = true) {
+  cancelPan(key)
+  const t = tf(key)
+  if (!animate) {
+    t.x = x
+    t.y = y
+    return
+  }
+  const sx = t.x
+  const sy = t.y
+  const dur = 280
+  const t0 = performance.now()
+  const step = (now: number) => {
+    const k = Math.min(1, (now - t0) / dur)
+    const e = 1 - Math.pow(1 - k, 3) // easeOutCubic
+    t.x = sx + (x - sx) * e
+    t.y = sy + (y - sy) * e
+    if (k < 1) panAnims.set(key, requestAnimationFrame(step))
+    else panAnims.delete(key)
+  }
+  panAnims.set(key, requestAnimationFrame(step))
+}
+
+/** 右栏选中某框时：若它在当前视口内不完整可见，则保持缩放把它的中心缓动平移到视口中央 */
+function revealBoxInView(img: CadImage, box: CadBox) {
+  const i = images.value.indexOf(img)
+  if (i < 0) return
+  const stage = document.getElementById(`cad-img-${i}`)?.querySelector('.img-stage') as HTMLElement | null
+  const imgEl = stage?.querySelector('.img-el') as HTMLImageElement | null
+  const d = dims[img.key]
+  if (!stage || !imgEl || !d || !d.w || !d.h) return
+  const sr = stage.getBoundingClientRect()
+  const ir = imgEl.getBoundingClientRect()
+  if (!ir.width || !ir.height) return
+  const toScreenX = (x: number) => ir.left + (x / d.w) * ir.width
+  const toScreenY = (y: number) => ir.top + (y / d.h) * ir.height
+  const cs = boxCorners(box)
+  if (!cs.length) return
+  const minX = Math.min(...cs.map((c) => toScreenX(c.x)))
+  const maxX = Math.max(...cs.map((c) => toScreenX(c.x)))
+  const minY = Math.min(...cs.map((c) => toScreenY(c.y)))
+  const maxY = Math.max(...cs.map((c) => toScreenY(c.y)))
+  const m = 4
+  if (minX >= sr.left - m && maxX <= sr.right + m && minY >= sr.top - m && maxY <= sr.bottom + m) return
+  const t = tf(img.key)
+  const c = boxCenter(box)
+  panTo(
+    img.key,
+    t.x + (sr.left + sr.width / 2 - toScreenX(c.x)),
+    t.y + (sr.top + sr.height / 2 - toScreenY(c.y)),
+  )
+}
+
 /** 拖动中的临时状态（非响应式，仅记录起点）；moved 用于区分「拖动后松手」与「单击」 */
 let drag: { key: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null = null
 const dragging = ref(false)
@@ -135,6 +198,7 @@ function togglePan(key: string) {
 function onWheel(img: CadImage, e: WheelEvent) {
   // 先拦截：无论是否已到缩放上下限，都不让滚轮冒泡影响外层滚动条
   e.preventDefault()
+  cancelPan(img.key) // 用户手动缩放时中断自动平移，避免两套位置互相覆盖
   const stage = e.currentTarget as HTMLElement
   const rect = stage.getBoundingClientRect()
   const cx = e.clientX - rect.left
@@ -187,6 +251,7 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     return
   }
   if (!panMode[img.key]) return
+  cancelPan(img.key) // 手动平移时中断自动平移动画
   const t = tf(img.key)
   drag = { key: img.key, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y, moved: false }
   dragging.value = true
@@ -368,6 +433,8 @@ const imagesPathPrefix = computed(() => (images.value[0] ? splitCadPath(images.v
 const activeBox = ref<CadBox | null>(null)
 /** 当前悬停命中的标注（图上悬停预览 / 右栏行悬停反向高亮共用） */
 const hoverBox = ref<CadBox | null>(null)
+/** 本次选中的来源：闪烁只提示用户视线不在的那一侧（点图闪列表行，点列表闪图上的框） */
+const flashSource = ref<'list' | 'img' | ''>('')
 function activateRow(row: (typeof allRows.value)[number]) {
   selectedIndex.value = row.imageIndex
   activeBox.value = row.box
@@ -377,8 +444,12 @@ function focusRow(row: (typeof allRows.value)[number]) {
   activateRow(row)
   activeBox.value = same ? null : row.box
   if (!same) {
+    flashSource.value = 'list'
     nextTick(() => {
       document.getElementById(`cad-img-${row.imageIndex}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // 选中框在当前视口外时保持缩放平移过去，使其可见
+      const img = images.value[row.imageIndex]
+      if (img) revealBoxInView(img, row.box)
     })
   }
 }
@@ -397,6 +468,7 @@ function scrollToRow(box: CadBox) {
 /** 切换高亮框（再次点同一个则取消） */
 function toggleActiveBox(box: CadBox) {
   activeBox.value = activeBox.value === box ? null : box
+  flashSource.value = activeBox.value ? 'img' : ''
   if (activeBox.value) scrollToRow(activeBox.value)
 }
 
@@ -1070,8 +1142,8 @@ function shapeFillOpacity(box: CadBox): number {
   return isPolygonBox(box) && fillPolygons.value ? 0.14 : 0
 }
 function shapeStrokeWidth(box: CadBox): number {
-  if (activeBox.value === box) return 5
-  return hoverBox.value === box ? 4 : 3
+  if (activeBox.value === box) return 9
+  return hoverBox.value === box ? 7 : 5
 }
 function shapeOpacity(box: CadBox): number {
   return activeBox.value && activeBox.value !== box && hoverBox.value !== box ? 0.4 : 1
@@ -1279,6 +1351,7 @@ onMounted(() => {
   window.addEventListener('keydown', onWindowKeyDown)
 })
 onBeforeUnmount(() => {
+  for (const k of panAnims.keys()) cancelPan(k)
   window.removeEventListener('mousemove', onWindowMouseMove)
   window.removeEventListener('mouseup', onWindowMouseUp)
   window.removeEventListener('keydown', onWindowKeyDown)
@@ -1361,7 +1434,7 @@ watch(rawKey, load)
                 ◇ 多边形
               </el-button>
             </span>
-            <!-- <span class="add-group edit-group">
+            <span class="add-group edit-group">
               <span class="add-group-label">✎ 编辑</span>
               <el-button
                 size="small"
@@ -1375,7 +1448,7 @@ watch(rawKey, load)
                 {{ editMode[img.key] ? '💾 保存编辑' : '✎ 进入编辑' }}
               </el-button>
               <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
-            </span> -->
+            </span>
           </div>
           <div v-if="editMode[img.key]" class="draw-bar edit-bar">
             <span class="draw-tip">
@@ -1435,6 +1508,7 @@ watch(rawKey, load)
                       :class="{
                         'box-shape--poly': isPolygonBox(box),
                         'box-shape--active': activeBox === box,
+                        'box-shape--flash': activeBox === box && flashSource === 'list',
                         'box-shape--hover': hoverBox === box && activeBox !== box,
                       }"
                       :points="pointsAttr(box)"
@@ -1596,7 +1670,11 @@ watch(rawKey, load)
               :id="`ann-row-${row.imageIndex}-${row.index}`"
               :class="[
                 'ann-item',
-                { 'ann-item--active': activeBox === row.box, 'ann-item--poly': row.isPolygon },
+                {
+                  'ann-item--active': activeBox === row.box,
+                  'ann-item--flash': activeBox === row.box && flashSource === 'img',
+                  'ann-item--poly': row.isPolygon,
+                },
               ]"
               @mouseenter="hoverBox = row.box"
               @mouseleave="hoverBox = null"
@@ -1962,6 +2040,20 @@ watch(rawKey, load)
   pointer-events: none;
 }
 
+/* 选中框闪烁：仅限从右栏选中时（用户视线在列表），刚被选中时吸引注意，跑完 3 次即停 */
+.box-shape--flash {
+  animation: box-flash 0.55s ease-in-out 3;
+}
+@keyframes box-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
 /* 高亮框中心的类型/数值标签：白描边保证在图纸上可读 */
 .box-label {
   pointer-events: none;
@@ -2070,6 +2162,26 @@ watch(rawKey, load)
 
 .ann-item--active {
   background: #ecf5ff;
+  /* 选中行加一圈粗边框更突出；用 outline 不改变盒模型、无布局抖动 */
+  outline: 2px solid #409eff;
+  outline-offset: -2px;
+  border-radius: 2px;
+}
+
+/* 图上点框联动选中时：闪烁对应列表行，提示视线回到列表 */
+.ann-item--flash {
+  animation: ann-flash 0.55s ease-in-out 3;
+}
+@keyframes ann-flash {
+  0%,
+  100% {
+    background: #ecf5ff;
+    box-shadow: none;
+  }
+  50% {
+    background: #d9ecff;
+    box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.4);
+  }
 }
 
 .ann-group {
