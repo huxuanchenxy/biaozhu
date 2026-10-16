@@ -99,8 +99,9 @@ function tf(key: string): CadTransform {
 }
 
 /**
- * 计算并应用 contain 适配：图片按宽度铺满时若高度超出视口，则整体缩小到刚好全显并居中；
- * 未超出则保持 1×，仅垂直居中。wrap 布局原点在视口左上角（transform-origin 0 0）。
+ * 计算并应用默认适配：以“填满视口高度”为准——图片高度铺满 stage，宽度按比例缩放
+ * （横向图会放大到填满高度、宽度溢出可拖动；纵向图缩小填满高度、两侧留白居中）。
+ * 放大上限受 MAX_SCALE 约束，超出时退回垂直居中。wrap 布局原点在视口左上角（transform-origin 0 0）。
  */
 function applyFit(key: string, stage: HTMLElement) {
   const d = dims[key]
@@ -109,7 +110,7 @@ function applyFit(key: string, stage: HTMLElement) {
   const sh = stage.clientHeight
   if (!sw || !sh) return
   const dispH = (d.h / d.w) * sw
-  const s = Math.min(1, sh / dispH)
+  const s = Math.min(MAX_SCALE, sh / dispH)
   const fit = { scale: s, x: (sw - sw * s) / 2, y: (sh - dispH * s) / 2 }
   fits[key] = fit
   transforms[key] = { ...fit }
@@ -1421,10 +1422,15 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
-        <span class="toolbar-hint">实线=矩形・虚线=多边形・单击框可联动右栏・「进入编辑」可拖动/改大小</span>
+        <span class="toolbar-hint">双击还原图片大小 ・ 单击框可联动右栏 ・ 可新增矩形或多边形 ・「进入编辑」可拖动/改大小・ 选中按Delete键可删除几何图形</span>
       </div>
 
-      <div ref="imageListRef" v-loading="loading" class="pane-body img-list">
+      <div
+        ref="imageListRef"
+        v-loading="loading"
+        class="pane-body img-list"
+        :class="{ 'img-list--single': isSingleImage }"
+      >
         <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" />
         <div v-else-if="!loading && !images.length" class="empty">暂无图片</div>
 
@@ -2002,9 +2008,33 @@ watch(rawKey, load)
 /* 左：切图卡片 */
 .img-list {
   padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 单图模式：卡片与视口纵向填满左栏，消除底部空白（多图模式仍用固定 62vh 逐张滚动） */
+.img-list--single .img-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.img-list--single .img-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.img-list--single .img-stage {
+  flex: 1;
+  height: auto;
 }
 
 .img-card {
+  /* 多图列于 flex 纵向容器时保持自身高度不被压缩（靠 overflow 滚动）；单图模式由 .img-list--single 覆盖为 flex:1 */
+  flex: 0 0 auto;
   margin-bottom: 16px;
   border: 1px solid #ebeef5;
   border-radius: 4px;
