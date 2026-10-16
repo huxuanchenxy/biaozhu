@@ -1463,18 +1463,16 @@ watch(rawKey, load)
           @click="selectImage(i)"
         >
           <div class="img-card-head">
-            <span class="img-path" :title="img.displayPath">{{ shortDisplayPath(img) }}</span>
             <a
               v-if="!isSingleImage"
-              class="img-single-link"
+              class="img-path img-path--link"
               :href="singleImageUrl(img)"
               target="_blank"
               rel="noopener"
-              title="在新标签打开仅针对当前图片的独立标注页"
+              :title="`打开仅针对当前图片的独立标注页：${img.displayPath}`"
               @click.stop
-            >
-              单图页
-            </a>
+            >{{ shortDisplayPath(img) }}</a>
+            <span v-else class="img-path" :title="img.displayPath">{{ shortDisplayPath(img) }}</span>
             <span class="img-meta">
               {{ img.boxes.length }} 个标注
               <em v-if="rectCountOf(img)">· 矩形 {{ rectCountOf(img) }}</em>
@@ -2093,24 +2091,14 @@ watch(rawKey, load)
   color: #909399;
 }
 
-/* 单图标注页入口：卡片头一个小文字链接，新标签打开仅含当前图片的页面 */
-.img-single-link {
-  flex: none;
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 8px;
-  border-radius: 10px;
-  color: #409eff;
-  background: #ecf5ff;
-  text-decoration: none;
-  white-space: nowrap;
-  border: 1px solid #d9ecff;
+/* 单图模式入口：多图下直接点击图片路径→新标签打开仅含当前图片的独立标注页 */
+.img-path--link {
+  cursor: pointer;
 }
 
-.img-single-link:hover {
-  color: #fff;
-  background: #409eff;
-  border-color: #409eff;
+.img-path--link:hover {
+  color: #409eff;
+  text-decoration: underline;
 }
 
 .img-meta em {
