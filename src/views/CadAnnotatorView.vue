@@ -1469,7 +1469,7 @@ watch(rawKey, load)
               :href="singleImageUrl(img)"
               target="_blank"
               rel="noopener"
-              :title="`打开仅针对当前图片的独立标注页：${img.displayPath}`"
+              :title="`当前图片：${img.displayPath}`"
               @click.stop
             >{{ shortDisplayPath(img) }}</a>
             <span v-else class="img-path" :title="img.displayPath">{{ shortDisplayPath(img) }}</span>
