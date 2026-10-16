@@ -431,6 +431,18 @@ function shortDisplayPath(img: CadImage): string {
 /** 工具条显示的公共路径前缀（取第一张图 /images/ 之前的部分） */
 const imagesPathPrefix = computed(() => (images.value[0] ? splitCadPath(images.value[0].displayPath).prefix : ''))
 
+/** 是否处于单图模式（路由 key 直指某张切图） */
+const isSingleImage = computed(() => !!cadPath.value?.focusImageName)
+
+/**
+ * 某张切图的独立标注页 URL：/cad/<图片对象完整路径>（每段单独编码，保留 '/'）。
+ * 新标签打开即为“只针对当前图片”的标注页，目录列表缩为这一张。
+ */
+function singleImageUrl(img: CadImage): string {
+  const encoded = img.key.split('/').map(encodeURIComponent).join('/')
+  return `${location.origin}${location.pathname}#/cad/${encoded}`
+}
+
 /** 高亮某条标注（右栏点击 → 选中所属图片 + 高亮对应框 + 滚动定位） */
 const activeBox = ref<CadBox | null>(null)
 /** 当前悬停命中的标注（图上悬停预览 / 右栏行悬停反向高亮共用） */
@@ -1250,7 +1262,8 @@ async function load() {
   hover.show = false
   const path = cadPath.value
   if (!path) {
-    loadError.value = '路径不合法，应为 /cad/<桶>/<任务目录>/annotations/<任务编号>/annotations.json'
+    loadError.value =
+      '路径不合法，应为 /cad/<桶>/<任务目录>/annotations/<任务编号>/annotations.json，或单图模式 /cad/<桶>/<任务目录>/images/<任务编号>/<图片名>.png'
     return
   }
   loading.value = true
@@ -1300,6 +1313,19 @@ async function load() {
       name: baseName(k),
       boxes: grouped.get(k) ?? [],
     }))
+
+    // 单图模式：路由 key 直接指向某张切图时，仅保留该图（功能与目录模式一致，只是范围缩到当前图片）
+    if (path.focusImageName) {
+      const only = images.value.filter((im) => im.name === path.focusImageName)
+      if (only.length) {
+        images.value = only
+      } else {
+        // 该文件在 images 目录下不存在：清空列表，只给“无此文件”错误（不再回退展示全部）
+        images.value = []
+        loadError.value = `未找到图片：${path.focusImageName}（目录 ${path.imagesPrefix} 下不存在该文件）`
+        return
+      }
+    }
 
     // 有框但没匹配到图的，挂到第一张图上，避免丢框
     if (unassigned.length && images.value.length) {
@@ -1403,6 +1429,17 @@ watch(rawKey, load)
         >
           <div class="img-card-head">
             <span class="img-path" :title="img.displayPath">{{ shortDisplayPath(img) }}</span>
+            <a
+              v-if="!isSingleImage"
+              class="img-single-link"
+              :href="singleImageUrl(img)"
+              target="_blank"
+              rel="noopener"
+              title="在新标签打开仅针对当前图片的独立标注页"
+              @click.stop
+            >
+              单图页
+            </a>
             <span class="img-meta">
               {{ img.boxes.length }} 个标注
               <em v-if="rectCountOf(img)">· 矩形 {{ rectCountOf(img) }}</em>
@@ -1995,6 +2032,26 @@ watch(rawKey, load)
   flex: none;
   font-size: 12px;
   color: #909399;
+}
+
+/* 单图标注页入口：卡片头一个小文字链接，新标签打开仅含当前图片的页面 */
+.img-single-link {
+  flex: none;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 10px;
+  color: #409eff;
+  background: #ecf5ff;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid #d9ecff;
+}
+
+.img-single-link:hover {
+  color: #fff;
+  background: #409eff;
+  border-color: #409eff;
 }
 
 .img-meta em {

@@ -80,23 +80,46 @@ export interface CadPath {
   annotationsKey: string
   /** 图片目录前缀（含结尾斜杠），用于列目录 */
   imagesPrefix: string
+  /**
+   * 单图模式：当路由 key 直接指向某张切图（`.../images/<taskId>/<图片名>.png`）时，
+   * 这里给出需要聚焦展示的图片文件名；其余情况为 undefined（按整任务目录全部展示）。
+   */
+  focusImageName?: string
 }
 
 /**
- * 解析 /cad/<key> 的 key（桶内完整对象路径）为目录结构。
- * 期望结尾为 `.../annotations/<taskId>/annotations.json`；不匹配时尽量回退：
- * 取倒数第二段为 taskId、去掉末段文件名后的父级的父级为 taskDir。
+ * 解析 /cad/<key> 的 key（桶内完整对象路径）为目录结构。支持两种写法：
+ *  1) 目录模式：结尾为 `.../annotations/<taskId>/annotations.json`，展示该任务全部切图；
+ *     不匹配时尽量回退：取倒数第二段为 taskId、去掉末段文件名后的父级的父级为 taskDir。
+ *  2) 单图模式：结尾为 `.../images/<taskId>/<图片名>.png`，据其反推同任务的 annotations.json，
+ *     并在 focusImageName 中回填要聚焦的图片文件名。
  */
 export function parseCadPath(rawKey: string): CadPath | null {
   const key = normalizeObjectKey(rawKey).replace(/\\/g, '/')
   if (!key) return null
   const segs = key.split('/')
   if (segs.length < 2) return null
-  // 末段应为 annotations.json（放宽：任意 .json 也接受）
+  const bucket = segs[0]
   const file = segs[segs.length - 1]
+
+  // 单图模式：<...任务目录>/images/<任务编号>/<图片名>.png（images 段恰在倒数第三段）
+  const imgIdx = segs.lastIndexOf('images')
+  if (imgIdx >= 1 && imgIdx === segs.length - 3 && /\.(png|jpe?g|webp)$/i.test(file)) {
+    const taskDir = segs.slice(0, imgIdx).join('/')
+    const taskId = segs[imgIdx + 1]
+    return {
+      bucket,
+      taskDir,
+      taskId,
+      annotationsKey: `${taskDir}/annotations/${taskId}/annotations.json`,
+      imagesPrefix: `${taskDir}/images/${taskId}/`,
+      focusImageName: file,
+    }
+  }
+
+  // 目录模式：末段应为 annotations.json（放宽：任意 .json 也接受）
   if (!/\.json$/i.test(file)) return null
   const taskId = segs[segs.length - 2]
-  const bucket = segs[0]
   // taskDir = 去掉末尾 `annotations/<taskId>/annotations.json` 三段；
   // 若倒数第三段不是 annotations，也按去掉末两段处理（容错命名差异）
   const annIdx = segs.length - 3
