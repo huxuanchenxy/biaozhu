@@ -72,8 +72,9 @@ const dims = reactive<Record<string, { w: number; h: number }>>({})
 /**
  * 悬停坐标：记录当前悬停图片、光标在视口(.img-stage)内的显示像素偏移，以及换算后的图片真实像素坐标。
  * left/top 用于定位跟随光标的标签；natX/natY 为标注 JSON 同系的像素坐标（十字线也用它）。
+ * sw/sh 为视口实时宽高，供坐标标签靠边时自动翻转到光标另一侧、避免被 overflow 裁切。
  */
-const hover = reactive({ key: '', show: false, left: 0, top: 0, natX: 0, natY: 0 })
+const hover = reactive({ key: '', show: false, left: 0, top: 0, natX: 0, natY: 0, sw: 0, sh: 0 })
 
 /**
  * 每张图独立的变换与交互态：
@@ -1201,6 +1202,8 @@ function onStageMove(img: CadImage, e: MouseEvent) {
   hover.key = img.key
   hover.left = e.clientX - stageRect.left
   hover.top = e.clientY - stageRect.top
+  hover.sw = stageRect.width
+  hover.sh = stageRect.height
   const pt = naturalPoint(img, e)
   if (pt) {
     hover.natX = Math.round(pt.x)
@@ -1217,6 +1220,24 @@ function onStageMove(img: CadImage, e: MouseEvent) {
 function onImgLeave() {
   hover.show = false
   hoverBox.value = null
+}
+
+/**
+ * 坐标标签定位：默认在光标右侧垂直居中；靠近某条边时翻转到另一侧，
+ * 避免标签被 .img-stage 的 overflow:hidden 裁切（上/下/左/右均适用）。
+ * 预留宽度按坐标位数估算（如 X: 12345, Y: 12345）。
+ */
+function coordLabelStyle() {
+  const labelW = 60 + String(Math.abs(hover.natX)).length * 9 + String(Math.abs(hover.natY)).length * 9
+  const nearRight = hover.left + labelW + 14 > hover.sw
+  const nearLeft = hover.left < labelW + 14
+  const nearTop = hover.top < 14
+  const nearBottom = hover.top > hover.sh - 14
+  const tx = nearRight && !nearLeft ? 'calc(-100% - 10px)' : '10px'
+  let ty = '-50%'
+  if (nearTop) ty = '2px'
+  else if (nearBottom) ty = 'calc(-100% - 2px)'
+  return { left: `${hover.left}px`, top: `${hover.top}px`, transform: `translate(${tx}, ${ty})` }
 }
 
 function selectImage(i: number) {
@@ -1678,11 +1699,11 @@ watch(rawKey, load)
                 <div class="crosshair-v" :style="{ left: hover.left + 'px' }"></div>
                 <div class="crosshair-h" :style="{ top: hover.top + 'px' }"></div>
               </div>
-              <!-- 跟随光标的坐标标签：置于未变换的视口内，不随图片缩放/平移漂移 -->
+              <!-- 跟随光标的坐标标签：置于未变换的视口内，不随图片缩放/平移漂移；靠边时自动翻转到光标另一侧避免被裁切 -->
               <div
                 v-if="hover.show && hover.key === img.key && !dragging"
                 class="coord-label"
-                :style="{ left: hover.left + 'px', top: hover.top + 'px' }"
+                :style="coordLabelStyle()"
               >
                 X: {{ hover.natX }}, Y: {{ hover.natY }}
               </div>
@@ -2167,7 +2188,6 @@ watch(rawKey, load)
 .coord-label {
   position: absolute;
   z-index: 2;
-  transform: translate(10px, -50%);
   padding: 0 2px;
   font-size: 13px;
   color: #ef4444;
