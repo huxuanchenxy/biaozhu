@@ -1728,7 +1728,7 @@ watch(rawKey, load)
                     <span class="ann-dot" :style="{ background: row.color }"></span>
                     {{ row.name }}
                   </span>
-                  <span class="ann-img-hint" :title="row.imageName">📄 {{ row.imageName }}</span>
+                  <span v-if="!isSingleImage" class="ann-img-hint" :title="row.imageName">📄 {{ row.imageName }}</span>
                 </div>
                 <div v-if="row.fields.length" class="ann-line ann-line--sub">
                   <span v-for="f in row.fields" :key="f.label" class="ann-field">
