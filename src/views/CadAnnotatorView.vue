@@ -1337,7 +1337,15 @@ async function load() {
       ElMessage.warning('未在 images 目录找到 png 切图')
     }
   } catch (e: any) {
-    loadError.value = `加载失败：${e?.message ?? '未知错误'}`
+    const msg = e?.message ?? '未知错误'
+    // 单图模式：标注文件路径是由 URL 里的“任务编号”反推的，编号/目录写错时读不到
+    // （MinIO 对不存在对象返回 403/404）。给“找不到该图片或其标注文件”的友好提示，
+    // 不直接把内部反推的 annotations.json 路径抛给用户。
+    if (path.focusImageName && /HTTP\s+(403|404)/i.test(msg)) {
+      loadError.value = `找不到该图片或其标注文件：${path.focusImageName}（请检查图片路径中的任务编号「${path.taskId}」与文件名是否正确）`
+    } else {
+      loadError.value = `加载失败：${msg}`
+    }
   } finally {
     loading.value = false
   }
