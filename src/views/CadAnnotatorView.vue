@@ -79,7 +79,7 @@ const hover = reactive({ key: '', show: false, left: 0, top: 0, natX: 0, natY: 0
 /**
  * 每张图独立的变换与交互态：
  *  - transforms[key] = { scale, x, y }：作用于 .img-wrap 的 translate+scale（transform-origin 0 0）。
- *  - panMode[key]：是否开启「抓手/拖动」模式。开启后拖动平移、滚轮失效；关闭时滚轮缩放、不响应拖动。
+ *  - 舞台常驻拖动：非绘制/非编辑模式下按下即平移；滚轮始终缩放。绘制/编辑模式按下走各自交互。
  */
 interface CadTransform {
   scale: number
@@ -87,7 +87,6 @@ interface CadTransform {
   y: number
 }
 const transforms = reactive<Record<string, CadTransform>>({})
-const panMode = reactive<Record<string, boolean>>({})
 const MIN_SCALE = 0.1
 const MAX_SCALE = 8
 
@@ -190,15 +189,6 @@ function revealBoxInView(img: CadImage, box: CadBox) {
 let drag: { key: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null = null
 const dragging = ref(false)
 
-function togglePan(key: string) {
-  panMode[key] = !panMode[key]
-  // 退出抓手模式时清掉可能残留的拖动
-  if (!panMode[key]) {
-    drag = null
-    dragging.value = false
-  }
-}
-
 /** 滚轮缩放（拖动中也可用）：以光标位置为锚点缩放，保持光标下的图像点不动 */
 function onWheel(img: CadImage, e: WheelEvent) {
   // 先拦截：无论是否已到缩放上下限，都不让滚轮冒泡影响外层滚动条
@@ -219,8 +209,9 @@ function onWheel(img: CadImage, e: WheelEvent) {
   manualTouched.add(img.key)
 }
 
-/** 抓手模式：按下开始平移；绘制模式下改走框选/顶点采集 */
+/** 舞台按下：绘制/编辑模式走各自交互；其余情况常驻平移拖动 */
 function onStageMouseDown(img: CadImage, e: MouseEvent) {
+  suppressNextClick = false // 新的一次按下开始，清掉上一轮拖动可能遗留的抑制标记
   if (drawMode[img.key] === 'rect') {
     const pt = naturalPoint(img, e)
     if (pt) {
@@ -257,7 +248,6 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     if (hit) startShapeDrag(hit, img, e, pt)
     return
   }
-  if (!panMode[img.key]) return
   cancelPan(img.key) // 手动平移时中断自动平移动画
   const t = tf(img.key)
   drag = { key: img.key, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y, moved: false }
@@ -297,7 +287,10 @@ function onWindowMouseUp() {
     finalizeRect()
     return
   }
-  if (drag?.moved) manualTouched.add(drag.key)
+  if (drag?.moved) {
+    manualTouched.add(drag.key)
+    suppressNextClick = true // 拖动位移后的松手会跟一次 click，抑制掉，避免误选中/取消选中标注框
+  }
   drag = null
   dragging.value = false
 }
@@ -341,13 +334,13 @@ function onWindowResize() {
   }, 160)
 }
 
-/** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；编辑模式下命中框→move；否则→默认（不显放大镜） */
+/** 每张图的光标样式：拖动中→grabbing；可拖动区→grab；编辑模式下命中框→move；悬停标注框→pointer */
 function cursorFor(key: string): string {
   if (drawMode[key]) return 'crosshair'
   if (geomDragging.value) return 'grabbing'
-  if (panMode[key]) return dragging.value && drag && drag.key === key ? 'grabbing' : 'grab'
   if (editMode[key]) return hover.show && hover.key === key && hoverBox.value ? 'move' : 'default'
-  return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'default'
+  if (dragging.value && drag && drag.key === key) return 'grabbing'
+  return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'grab'
 }
 
 /** 叠加层尺寸基准：viewBox 为自然像素，按图宽归一（以 1000px 为 1 单）使线宽/字体不随图大小差异 */
@@ -724,7 +717,6 @@ function toggleDraw(img: CadImage, shape: DrawShape) {
   }
   stopDraw()
   drawMode[key] = shape
-  panMode[key] = false
   selectedIndex.value = i
   draft.imageIndex = i
   draft.shape = shape
@@ -843,7 +835,6 @@ function toggleEdit(img: CadImage) {
   }
   stopDraw()
   for (const k of Object.keys(editMode)) editMode[k] = false
-  for (const k of Object.keys(panMode)) panMode[k] = false
   geomSnapshot = ann.value ? snapshotGeometry() : null
   editDirty.value = false
   editMode[key] = true
@@ -1368,10 +1359,9 @@ async function load() {
   selectedIndex.value = 0
   loadError.value = ''
   unassignedCount.value = 0
-  // 换图时清空上一份的缩放/平移/抓手态与尺寸缓存
+  // 换图时清空上一份的缩放/平移态与尺寸缓存
   for (const k of Object.keys(transforms)) delete transforms[k]
   for (const k of Object.keys(fits)) delete fits[k]
-  for (const k of Object.keys(panMode)) delete panMode[k]
   for (const k of Object.keys(dims)) delete dims[k]
   drag = null
   dragging.value = false
@@ -1577,15 +1567,6 @@ watch(rawKey, load)
               <em v-if="rectCountOf(img)">· 矩形 {{ rectCountOf(img) }}</em>
               <em v-if="polyCountOf(img)">· 多边形 {{ polyCountOf(img) }}</em>
             </span>
-            <el-button
-              size="small"
-              round
-              :disabled="!!drawMode[img.key]"
-              :type="panMode[img.key] ? 'primary' : 'default'"
-              @click.stop="togglePan(img.key)"
-            >
-              {{ panMode[img.key] ? '👉 拖动中' : '✋ 抓手' }}
-            </el-button>
             <span class="add-group">
               <span class="add-group-label">＋ 新增</span>
               <el-button
