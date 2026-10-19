@@ -238,6 +238,7 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
   if (drawMode[img.key] === 'polygon') return // 多边形顶点在 click 里累加
   // 几何编辑模式：先命中当前选中框的手柄→缩放；否则命中框体→平移（均按自然坐标算）
   if (editMode[img.key]) {
+    if (editDialog.value) return // 方案B：属性弹框打开期间挂起左栏几何拖拽/手柄交互
     const pt = naturalPoint(img, e)
     if (!pt) return
     const ab = activeBox.value
@@ -553,7 +554,11 @@ const typeOptions = computed(() => {
   return opts
 })
 
-function startEdit(row: AnnRow) {
+async function startEdit(row: AnnRow) {
+  // 方案A：几何编辑且有未保存修改时，先让用户决定几何改动怎么处理（处理完退出编辑态），再进入属性编辑
+  const decision = await resolveGeomConflict()
+  if (decision === 'abort') return
+  if (!(await settleGeomConflict(decision))) return
   const box = row.box
   editBox.value = box
   editType.value = ''
@@ -605,6 +610,10 @@ async function submitEdit() {
 }
 
 async function deleteBox(row: AnnRow) {
+  // 方案A：删除同样会整份写回，先处理未保存的几何修改（处理完退出编辑态），避免几何被静默落盘或随后回滚造成不一致
+  const decision = await resolveGeomConflict()
+  if (decision === 'abort') return
+  if (!(await settleGeomConflict(decision))) return
   try {
     await ElMessageBox.confirm(
       `确定删除标注「${row.name}」？此操作会写回并覆盖原 annotations.json，不可恢复。`,
@@ -732,8 +741,8 @@ function stopDraw() {
 }
 
 /* ------------------------------------------------------------------
- * 几何编辑：「进入编辑」后可拖动标注框整体平移，拖动顶点改变大小
- *  （矩形四角缩放，多边形逐顶点变形）；「保存编辑」写回 MinIO，
+ * 几何编辑：「修改几何」后可拖动标注框整体平移，拖动顶点改变大小
+ *  （矩形四角缩放，多边形逐顶点变形）；「保存几何」写回 MinIO，
  *  取消/Esc 用进入时的快照回滚。
  * ------------------------------------------------------------------ */
 const editMode = reactive<Record<string, boolean>>({})
@@ -783,6 +792,48 @@ function restoreGeometry() {
   }
 }
 
+/**
+ * 方案A 前置询问：几何编辑中且有未保存修改时，右栏「编辑/删除」会触发整份写回，
+ * 先把几何改动的处置权交给用户，避免其被静默落盘、或之后取消编辑回滚造成内存/磁盘不一致。
+ * 返回：'none' 无未保存几何（直接继续）；否则 'save' 保存几何并继续 / 'discard' 放弃并继续 / 'abort' 取消整个操作。
+ */
+async function resolveGeomConflict(): Promise<'save' | 'discard' | 'abort' | 'none'> {
+  const editing = Object.values(editMode).some(Boolean)
+  if (!editing || !editDirty.value) return 'none'
+  try {
+    await ElMessageBox.confirm(
+      '当前标注有未保存的几何修改，继续操作前请先选择如何处理这些几何改动：',
+      '未保存的几何修改',
+      {
+        type: 'warning',
+        confirmButtonText: '保存几何并继续',
+        cancelButtonText: '放弃修改并继续',
+        distinguishCancelAndClose: true,
+        closeOnClickModal: false,
+      },
+    )
+    return 'save'
+  } catch (action) {
+    // 点「放弃修改并继续」→ cancel；点右上角关闭/Esc → close（视为取消整个操作）
+    return action === 'cancel' ? 'discard' : 'abort'
+  }
+}
+
+/**
+ * 处理几何冲突决策的收尾：save→写回几何；discard→回滚到快照。
+ * 无论哪种决策（含无未保存改动的 'none'），都退出几何编辑态，使左栏「修改几何」按钮复原；
+ * 未处于编辑态时 exitEdit 为幂等空操作。返回 false 表示写回失败，调用方应中止后续属性编辑/删除。
+ */
+async function settleGeomConflict(decision: 'save' | 'discard' | 'none'): Promise<boolean> {
+  if (decision === 'save') {
+    if (!(await persist('已保存几何'))) return false
+  } else if (decision === 'discard') {
+    restoreGeometry()
+  }
+  exitEdit()
+  return true
+}
+
 /** 进入/退出某图的几何编辑：全局互斥，一次只编辑一张图 */
 function toggleEdit(img: CadImage) {
   const key = img.key
@@ -806,11 +857,9 @@ async function saveEdit() {
     exitEdit()
     return
   }
-  const ok = await persist('已保存编辑')
+  const ok = await persist('已保存几何')
   if (ok) exitEdit()
 }
-// 模板里「✎ 进入编辑」按钮组当前被注释隐藏，这里保留函数引用以免 noUnusedLocals 报错；恢复按钮时可删除下一行
-void [toggleEdit, saveEdit]
 
 /** 取消：有未保存修改时二次确认，确认后就地还原几何快照 */
 async function cancelEdit() {
@@ -1479,7 +1528,7 @@ watch(rawKey, load)
           <span v-if="imagesPathPrefix" class="toolbar-path" :title="imagesPathPrefix">{{ imagesPathPrefix }}</span>
         </span>
         <span v-if="loading" class="hint">加载中…</span>
-        <span v-else class="hint">{{ images.length }} 张切图</span>
+        <span v-else-if="!isSingleImage" class="hint">{{ images.length }} 张切图</span>
       </header>
       <!-- <div class="cad-path">当前图片：{{ currentImage?.displayPath || (cadPath?.imagesPrefix ?? '') }}</div> -->
 
@@ -1493,7 +1542,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
-        <span class="toolbar-hint">双击还原图片大小 ・ 单击框可联动右栏 ・ 可新增矩形或多边形 ・「进入编辑」可拖动/改大小・ 选中按Delete键可删除几何图形</span>
+        <span class="toolbar-hint">双击还原图片大小 ・ 单击框可联动右栏 ・ 可新增矩形或多边形 ・「修改几何」可拖动/改大小・ 选中按Delete键可删除几何图形</span>
       </div>
 
       <div
@@ -1566,17 +1615,17 @@ watch(rawKey, load)
                 :disabled="!!drawMode[img.key]"
                 :loading="editMode[img.key] && saving"
                 :type="editMode[img.key] ? 'primary' : 'default'"
-                :title="editMode[img.key] ? '保存本次几何修改并写回 MinIO' : '进入编辑：可拖动标注框、拖角点改大小'"
+                :title="editMode[img.key] ? '保存本次几何修改并写回 MinIO' : '修改几何图形：拖动标注框平移、拖角点改大小（不影响属性）'"
                 @click.stop="editMode[img.key] ? saveEdit() : toggleEdit(img)"
               >
-                {{ editMode[img.key] ? '💾 保存编辑' : '✎ 进入编辑' }}
+                {{ editMode[img.key] ? '💾 保存几何' : '✎ 修改几何' }}
               </el-button>
               <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
             </span>
           </div>
           <div v-if="editMode[img.key]" class="draw-bar edit-bar">
             <span class="draw-tip">
-              编辑模式：拖动框体平移；单击选中后拖动手柄可改变矩形大小 / 多边形顶点（Esc 或「取消」放弃修改）
+              几何修改模式：拖动框体平移；单击选中后拖动手柄可改变矩形大小 / 多边形顶点（Esc 或「取消」放弃修改）
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
@@ -1650,7 +1699,7 @@ watch(rawKey, load)
                         v-if="showVertices || editMode[img.key]"
                         v-for="(c, ci) in cornersOf(box)"
                         :key="`v-${ci}`"
-                        :class="['vertex-handle', { 'vertex-handle--drag': editMode[img.key] }]"
+                        :class="['vertex-handle', { 'vertex-handle--drag': editMode[img.key] && !editDialog }]"
                         :cx="c.x"
                         :cy="c.y"
                         :r="vertexRadius(img.key) * (editMode[img.key] ? 2.4 : 1)"
