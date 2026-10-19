@@ -93,6 +93,8 @@ const MAX_SCALE = 8
 
 /** 每张图的默认适配态（contain：整张图完整可见并居中），加载完成/双击复位时回到这个态 */
 const fits = reactive<Record<string, CadTransform>>({})
+/** 用户手动缩放/平移过的图片：窗口尺寸变化时重算 fits 但不覆盖其当前视图 */
+const manualTouched = new Set<string>()
 
 function tf(key: string): CadTransform {
   if (!transforms[key]) transforms[key] = { scale: 1, x: 0, y: 0 }
@@ -176,6 +178,7 @@ function revealBoxInView(img: CadImage, box: CadBox) {
   if (minX >= sr.left - m && maxX <= sr.right + m && minY >= sr.top - m && maxY <= sr.bottom + m) return
   const t = tf(img.key)
   const c = boxCenter(box)
+  manualTouched.add(img.key) // 联动平移后不再跟随窗口尺寸重算，避免覆盖用户正在查看的位置
   panTo(
     img.key,
     t.x + (sr.left + sr.width / 2 - toScreenX(c.x)),
@@ -213,6 +216,7 @@ function onWheel(img: CadImage, e: WheelEvent) {
   t.x = cx - k * (cx - t.x)
   t.y = cy - k * (cy - t.y)
   t.scale = next
+  manualTouched.add(img.key)
 }
 
 /** 抓手模式：按下开始平移；绘制模式下改走框选/顶点采集 */
@@ -292,14 +296,48 @@ function onWindowMouseUp() {
     finalizeRect()
     return
   }
+  if (drag?.moved) manualTouched.add(drag.key)
   drag = null
   dragging.value = false
 }
 
-/** 双击复位到默认适配态（整张图全显） */
+/** 双击复位到默认适配态（整张图全显）；按当前实际视口尺寸重算，窗口缩放后仍然有效 */
 function resetTransform(img: CadImage) {
+  const i = images.value.indexOf(img)
+  const stage = i >= 0 ? (document.getElementById(`cad-img-${i}`)?.querySelector('.img-stage') as HTMLElement | null) : null
+  if (stage && dims[img.key]?.w && dims[img.key]?.h) {
+    applyFit(img.key, stage) // 内部会同步刷新 fits[key] 与 transforms[key]
+    manualTouched.delete(img.key)
+    return
+  }
   const f = fits[img.key]
   transforms[img.key] = f ? { ...f } : { scale: 1, x: 0, y: 0 }
+  manualTouched.delete(img.key)
+}
+
+/**
+ * 窗口尺寸变化：.img-stage 的视口尺寸（62vh / 单图 flex）随之改变，旧 fits 会失真，
+ * 导致双击复位/联动平移回到错误位置。防抖后按新视口重算每张图的 fits；
+ * 未手动操作过的图同步跟随新适配态，已手动缩放/平移的图仅刷新 fits 不覆盖当前视图。
+ */
+let resizeTimer: number | null = null
+function onWindowResize() {
+  if (resizeTimer != null) clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = null
+    images.value.forEach((img, i) => {
+      const stage = document.getElementById(`cad-img-${i}`)?.querySelector('.img-stage') as HTMLElement | null
+      if (!stage || !dims[img.key]?.w || !dims[img.key]?.h) return
+      if (manualTouched.has(img.key)) {
+        // 只重算默认态（供双击复位使用），不干扰用户当前视图
+        const prev = transforms[img.key]
+        applyFit(img.key, stage)
+        if (prev) transforms[img.key] = prev
+      } else {
+        applyFit(img.key, stage) // 仍处于默认适配态，直接跟随新视口
+      }
+    })
+  }, 160)
 }
 
 /** 每张图的光标样式：拖动中→grabbing；抓手模式→grab；编辑模式下命中框→move；否则→默认（不显放大镜） */
@@ -534,6 +572,14 @@ function startEdit(row: AnnRow) {
         editFields.value.push({ key: k, label: f?.name || k, value: text })
       }
     }
+    // 矩形补齐标准属性字段：新增时留空未落盘的（如数值）编辑时也始终有空输入框，与新增弹框一致
+    if (!editIsPolygon.value) {
+      for (const af of CAD_RECT_ATTR_FIELDS) {
+        if (!editFields.value.some((ef) => ef.key === af.key)) {
+          editFields.value.push({ key: af.key, label: af.label, value: '' })
+        }
+      }
+    }
   }
   editDialog.value = true
 }
@@ -547,10 +593,11 @@ async function submitEdit() {
     for (const [k, f] of Object.entries(map)) {
       if ((k === 'type' || f?.type === 'radio') && f) f.value = editType.value
     }
-    // 回写其余文本字段
+    // 回写其余文本字段：content 里原本缺失的标准属性（编辑时补空渲染）填了值才新增落盘，留空不写入
     for (const ef of editFields.value) {
       const f = map[ef.key]
       if (f) f.value = ef.value
+      else if (ef.value.trim()) map[ef.key] = { type: 'input', name: ef.label, value: ef.value.trim() }
     }
   }
   editDialog.value = false
@@ -1409,12 +1456,15 @@ onMounted(() => {
   window.addEventListener('mousemove', onWindowMouseMove)
   window.addEventListener('mouseup', onWindowMouseUp)
   window.addEventListener('keydown', onWindowKeyDown)
+  window.addEventListener('resize', onWindowResize)
 })
 onBeforeUnmount(() => {
   for (const k of panAnims.keys()) cancelPan(k)
+  if (resizeTimer != null) clearTimeout(resizeTimer)
   window.removeEventListener('mousemove', onWindowMouseMove)
   window.removeEventListener('mouseup', onWindowMouseUp)
   window.removeEventListener('keydown', onWindowKeyDown)
+  window.removeEventListener('resize', onWindowResize)
 })
 watch(rawKey, load)
 </script>
@@ -1864,8 +1914,8 @@ watch(rawKey, load)
 
 .pane-right {
   flex: 1;
-  min-width: 350px;
-  max-width: 540px;
+  /* 与左栏图片按 1:3 动态分宽（即图片:标注 = 3:1），不再用定宽锁死；仅保留极窄窗口下的可读下限 */
+  min-width: 280px;
 }
 
 .pane-head {
