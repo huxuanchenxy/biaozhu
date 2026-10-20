@@ -538,13 +538,13 @@ const editType = ref('')
 const editHasType = ref(false)
 /** 当前编辑的框是否为多边形（决定类型单选项取哪套清单） */
 const editIsPolygon = ref(false)
-/** 除类型外的可编辑文本字段（由 box.content 动态得出，标准字段全量展示，当前类型不适用的置灰禁用） */
+/** 除类型外的可编辑文本字段（由 box.content 动态得出，标准字段全量展示，当前类型不适用的置灰禁用且切换类型时自动置空） */
 const editFields = ref<Array<{ key: string; label: string; value: string }>>([])
 /** 当前编辑类型的细化规则（字段禁用/必填/格式） */
 const editRule = computed(() => typeRuleFor(editIsPolygon.value, editType.value))
 /** 标准属性字段 key 集合：用于区分数据自带的额外字段（额外字段始终可编辑） */
 const STD_ATTR_KEYS = new Set(CAD_RECT_ATTR_FIELDS.map((f) => f.key))
-/** 编辑弹框字段是否可用：标准字段按当前类型规则，不在规则内的置灰禁用但保留旧值 */
+/** 编辑弹框字段是否可用：标准字段按当前类型规则，不在规则内的置灰禁用（切换类型时会被置空并在保存时从磁盘删除） */
 function editFieldEnabled(key: string): boolean {
   return !STD_ATTR_KEYS.has(key) || editRule.value.fields.includes(key)
 }
@@ -623,6 +623,15 @@ function refreshEditErrors() {
 }
 watch([editFields, editType], refreshEditErrors, { deep: true })
 
+/** 切换类型时：把当前类型不用的标准属性输入框置空（避免旧值残留为脏数据；保存时再从 content 删除该键） */
+watch(editType, () => {
+  if (editIsPolygon.value) return
+  const rule = editRule.value
+  for (const ef of editFields.value) {
+    if (STD_ATTR_KEYS.has(ef.key) && !rule.fields.includes(ef.key)) ef.value = ''
+  }
+})
+
 async function submitEdit() {
   // 类型细化校验：必填 → 格式 → 上下公差关系，不通过不关弹框，错误在对应表单项下方行内标红
   editSubmitted.value = true
@@ -636,11 +645,15 @@ async function submitEdit() {
     for (const [k, f] of Object.entries(map)) {
       if ((k === 'type' || f?.type === 'radio') && f) f.value = editType.value
     }
-    // 回写其余文本字段：当前类型不适用的标准字段（置灰禁用）不碰其磁盘旧值，既不回写也不删除；
-    // 有值写值；原本存在的字段被清空时删除该键，维持「留空不落盘」约定；
-    // content 里缺失的标准属性填了值才新增落盘
+    // 回写其余文本字段：
+    //  - 当前类型不用的标准字段：从 content 删除该键，清掉切换类型后遗留的脏数据（输入框已同步置空）；
+    //  - 适用字段：有值写值；原本存在的字段被清空时删除该键，维持「留空不落盘」约定；
+    //  content 里缺失的标准属性填了值才新增落盘。
     for (const ef of editFields.value) {
-      if (STD_ATTR_KEYS.has(ef.key) && !editRule.value.fields.includes(ef.key)) continue
+      if (STD_ATTR_KEYS.has(ef.key) && !editRule.value.fields.includes(ef.key)) {
+        if (map[ef.key]) delete map[ef.key]
+        continue
+      }
       const f = map[ef.key]
       const v = ef.value.trim()
       if (f) {

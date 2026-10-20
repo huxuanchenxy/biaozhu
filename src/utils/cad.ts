@@ -474,8 +474,10 @@ const TOL_LINEAR = rectRule(['value', UPPER, LOWER, 'tolerance-grade'], ['value'
 const DIM_ONLY = rectRule(['value'], ['value'], { value: 'number' })
 /** GD&T 形状公差（无基准）：数值必填，公差带宽度 */
 const GDT_FORM = rectRule(['value'], ['value'], { value: 'gdt' })
-/** GD&T 方向/位置/跳动/轮廓度（带基准）：数值 + 基准必填 */
+/** GD&T 方向/位置/跳动（带基准）：数值 + 基准必填 */
 const GDT_DATUM = rectRule(['value', 'datum'], ['value', 'datum'], { value: 'gdt', datum: 'datum' })
+/** GD&T 轮廓度（基准可选）：数值必填，基准可填可不填（无基准时仅控形状） */
+const GDT_PROFILE = rectRule(['value', 'datum'], ['value'], { value: 'gdt', datum: 'datum' })
 
 export const RECT_TYPE_RULES: Record<string, CadTypeRule> = {
   /* ---- 尺寸类 ---- */
@@ -529,8 +531,8 @@ export const RECT_TYPE_RULES: Record<string, CadTypeRule> = {
   symmetry: GDT_DATUM,
   'circular-runout': GDT_DATUM,
   'total-runout': GDT_DATUM,
-  'profile-of-a-line': GDT_DATUM,
-  'profile-of-a-surface': GDT_DATUM,
+  'profile-of-a-line': GDT_PROFILE,
+  'profile-of-a-surface': GDT_PROFILE,
 }
 
 /** 多边形（剖面线/填充区域）无属性字段，只要求类型本身 */
@@ -550,17 +552,17 @@ export function typeRuleFor(isPolygon: boolean, typeCode: string): CadTypeRule {
 }
 
 const ATTR_VALIDATOR_CHECKS: Record<Exclude<CadAttrValidator, 'text'>, { msg: string; test: (s: string) => boolean }> = {
-  number: { msg: '必须是数字（可带负号与小数），如 30、-0.5、12.75', test: (s) => /^-?\d+(\.\d+)?$/.test(s) },
-  integer: { msg: '必须是整数编号，如 12', test: (s) => /^\d+$/.test(s) },
-  deviation: { msg: '应为数值公差，可带符号或 ±，如 +0.05、-0.02、±0.1', test: (s) => /^[±]?[+-]?\d+(\.\d+)?$/.test(s) },
+  number: { msg: '必须是数字（可带 φ/⌀/R/SR 等前缀、负号与小数），如 30、φ30、R12、-0.5、12.75', test: (s) => /^[Φφ⌀RS]*-?\d+(\.\d+)?$/.test(s.replace(/\s+/g, '')) },
+  integer: { msg: '应为编号，可带字母前缀或区间，如 12、W3、1-3', test: (s) => /^[A-Za-z]?\d+([-~]\d+)?$/.test(s.replace(/\s+/g, '')) },
+  deviation: { msg: '应为数值公差，可带符号、± 或 φ，如 +0.05、-0.02、±0.1、±φ0.05', test: (s) => /^[±]?[+-]?[Φφ⌀]?\d+(\.\d+)?$/.test(s.replace(/\s+/g, '')) },
   angle: { msg: '应为角度值（可含 ° ′ ″），如 45、30.5、45°、1°30′', test: (s) => /\d/.test(s) && /^-?[\d.,°′″'" ]+$/.test(s) },
-  gdt: { msg: '应为公差带宽度数值，可带 φ 与最大实体 M 前/后缀，如 0.2、φ0.1、φ0.2M', test: (s) => /^[Φφ⌀]?\d+(\.\d+)?[Mm]?$/.test(s) },
+  gdt: { msg: '应为公差带宽度数值，可带 φ、C/S 前缀与 M/L/C 修饰，如 0.2、φ0.1、Sφ0.2、φ0.2M', test: (s) => /^[SC]?[Φφ⌀]?\d+(\.\d+)?([MLC]|\([MLC]\))?$/.test(s.replace(/\s+/g, '')) },
   thread: {
     msg: '应为螺纹代号，如 M12x1.75-6H、G1/2、NPT3/4、Tr40x7',
     test: (s) => /^[A-Za-z][A-Za-z0-9\s./×xX-]*$/.test(s) && (/[0-9]/.test(s) || s.includes('/')),
   },
-  datum: { msg: '应为大写基准字母，多个用 - 连接，如 A、A-B', test: (s) => /^[A-Z](-[A-Z])?$/.test(s) },
-  itGrade: { msg: '公差等级形如 IT7（可带字母带号，如 H7、6H）', test: (s) => /^(IT\d+|\d+[HhGgDdA-Za-z]|[A-Za-z]\d+)$/i.test(s) },
+  datum: { msg: '应为大写基准字母，1~3 个用 - / | 或空格连接，可带 M/L/C 修饰，如 A、A-B、A-B-C、A(M)', test: (s) => /^[A-Z](-[A-Z]){0,2}([MLC]|\([MLC]\))?$/.test(s.trim().replace(/[\s|]+/g, '-').replace(/-{2,}/g, '-')) },
+  itGrade: { msg: '公差等级形如 IT7（可带字母带号，如 H7、6H、7g）', test: (s) => /^(IT\d+|\d+[HhGgDdA-Za-z]|[A-Za-z]\d+)$/i.test(s) },
 }
 
 /**
