@@ -382,7 +382,7 @@ function sendStatic(res, urlPath) {
       html = html.replace(/<\/head>/i, themeBootstrap(APP_THEME) + '</head>')
     }
     const buf = Buffer.from(html, 'utf8')
-    res.writeHead(200, { 'Content-Type': MIME['.html'], 'Content-Length': buf.size })
+    res.writeHead(200, { 'Content-Type': MIME['.html'], 'Content-Length': buf.length })
     res.end(buf)
     return
   }
