@@ -656,18 +656,25 @@ async function submitEdit() {
 }
 
 async function deleteBox(row: AnnRow) {
-  // 方案A：删除同样会整份写回，先处理未保存的几何修改（处理完退出编辑态），避免几何被静默落盘或随后回滚造成不一致
-  const decision = await resolveGeomConflict()
-  if (decision === 'abort') return
-  if (!(await settleGeomConflict(decision))) return
+  // 删除是明确意图：直接弹删除确认，不再前置询问几何改动如何处理。
+  // 但若正处于几何编辑且有未保存修改，删除会整份写回，故在确认后先放弃这些几何改动（就地回滚快照并退出编辑），
+  // 避免其它标注框未保存的几何被静默落盘（回滚只改坐标、不换引用，row.box 仍在源数组中，删除照常进行）。
+  const hasPendingGeom = Object.values(editMode).some(Boolean) && editDirty.value
   try {
     await ElMessageBox.confirm(
-      `确定删除标注「${row.name}」？此操作会写回并覆盖原 annotations.json，不可恢复。`,
+      hasPendingGeom
+        ? `确定删除标注「${row.name}」？当前未保存的几何修改将一并放弃。此操作会写回并覆盖原 annotations.json，不可恢复。`
+        : `确定删除标注「${row.name}」？此操作会写回并覆盖原 annotations.json，不可恢复。`,
       '删除标注',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
     )
   } catch {
     return
+  }
+  // 确认删除后：先放弃未保存的几何修改并退出编辑态（必须在 exitEdit 前调用，exitEdit 会清空快照）
+  if (hasPendingGeom) {
+    restoreGeometry()
+    exitEdit()
   }
   const src = ann.value
   if (!src) return
