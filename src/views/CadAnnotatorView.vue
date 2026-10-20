@@ -23,6 +23,8 @@ import {
   parseCadPath,
   saveCadAnnotations,
   splitedImageName,
+  typeRuleFor,
+  collectRuleErrors,
   type CadAnnotations,
   type CadBox,
   type CadCorner,
@@ -536,8 +538,22 @@ const editType = ref('')
 const editHasType = ref(false)
 /** 当前编辑的框是否为多边形（决定类型单选项取哪套清单） */
 const editIsPolygon = ref(false)
-/** 除类型外的可编辑文本字段（由 box.content 动态得出） */
+/** 除类型外的可编辑文本字段（由 box.content 动态得出，标准字段全量展示，当前类型不适用的置灰禁用） */
 const editFields = ref<Array<{ key: string; label: string; value: string }>>([])
+/** 当前编辑类型的细化规则（字段禁用/必填/格式） */
+const editRule = computed(() => typeRuleFor(editIsPolygon.value, editType.value))
+/** 标准属性字段 key 集合：用于区分数据自带的额外字段（额外字段始终可编辑） */
+const STD_ATTR_KEYS = new Set(CAD_RECT_ATTR_FIELDS.map((f) => f.key))
+/** 编辑弹框字段是否可用：标准字段按当前类型规则，不在规则内的置灰禁用但保留旧值 */
+function editFieldEnabled(key: string): boolean {
+  return !STD_ATTR_KEYS.has(key) || editRule.value.fields.includes(key)
+}
+/** 逐字段行内错误提示（表单项下方红字）；首次提交前只提示已填内容的格式错，提交后补显空必填 */
+const editErrors = ref<Record<string, string>>({})
+const editSubmitted = ref(false)
+const editTypeErr = computed(() =>
+  editSubmitted.value && editHasType.value && !editType.value.trim() ? '请选择类型' : '',
+)
 
 /** 类型选项：按形状选用矩形/多边形清单 + 当前值（若未收录则追加一项，避免选中项不显示） */
 const typeOptions = computed(() => {
@@ -558,6 +574,8 @@ async function startEdit(row: AnnRow) {
   editHasType.value = false
   editIsPolygon.value = isPolygonBox(box)
   editFields.value = []
+  editSubmitted.value = false
+  editErrors.value = {}
   const content = box.content
   if (content && !Array.isArray(content)) {
     for (const [k, f] of Object.entries(content)) {
@@ -570,19 +588,46 @@ async function startEdit(row: AnnRow) {
         editFields.value.push({ key: k, label: f?.name || k, value: text })
       }
     }
-    // 矩形补齐标准属性字段：新增时留空未落盘的（如数值）编辑时也始终有空输入框，与新增弹框一致
-    if (!editIsPolygon.value) {
-      for (const af of CAD_RECT_ATTR_FIELDS) {
-        if (!editFields.value.some((ef) => ef.key === af.key)) {
-          editFields.value.push({ key: af.key, label: af.label, value: '' })
-        }
+  }
+  // 矩形才补齐标准属性字段展示：当前类型不适用的置灰禁用（而非隐藏），旧字段磁盘值照常回显；
+  // 多边形没有属性字段，不补空输入框（旧数据里残留的属性仍照常回显且置灰）
+  if (!editIsPolygon.value) {
+    for (const af of CAD_RECT_ATTR_FIELDS) {
+      if (!editFields.value.some((ef) => ef.key === af.key)) {
+        editFields.value.push({ key: af.key, label: af.label, value: '' })
       }
     }
   }
   editDialog.value = true
 }
 
+/** 从编辑表单取值：优先当前展示的字段，其次 content 里被禁用的历史值 */
+function editFieldValue(key: string): string {
+  const ef = editFields.value.find((f) => f.key === key)
+  if (ef) return ef.value
+  const content = editBox.value?.content
+  if (content && !Array.isArray(content)) {
+    const v = content[key]?.value
+    return v == null ? '' : typeof v === 'string' ? v : String(v)
+  }
+  return ''
+}
+
+/** 按类型规则刷新逐字段错误；未提交前不追空必填的错，避免一进弹框满屏红 */
+function refreshEditErrors() {
+  const errs = collectRuleErrors(editRule.value, editFieldValue)
+  if (!editSubmitted.value) {
+    for (const k of editRule.value.required) if (!editFieldValue(k).trim()) delete errs[k]
+  }
+  editErrors.value = errs
+}
+watch([editFields, editType], refreshEditErrors, { deep: true })
+
 async function submitEdit() {
+  // 类型细化校验：必填 → 格式 → 上下公差关系，不通过不关弹框，错误在对应表单项下方行内标红
+  editSubmitted.value = true
+  refreshEditErrors()
+  if (editTypeErr.value || Object.keys(editErrors.value).length) return
   const box = editBox.value
   const content = box?.content
   if (box && content && !Array.isArray(content)) {
@@ -591,11 +636,19 @@ async function submitEdit() {
     for (const [k, f] of Object.entries(map)) {
       if ((k === 'type' || f?.type === 'radio') && f) f.value = editType.value
     }
-    // 回写其余文本字段：content 里原本缺失的标准属性（编辑时补空渲染）填了值才新增落盘，留空不写入
+    // 回写其余文本字段：当前类型不适用的标准字段（置灰禁用）不碰其磁盘旧值，既不回写也不删除；
+    // 有值写值；原本存在的字段被清空时删除该键，维持「留空不落盘」约定；
+    // content 里缺失的标准属性填了值才新增落盘
     for (const ef of editFields.value) {
+      if (STD_ATTR_KEYS.has(ef.key) && !editRule.value.fields.includes(ef.key)) continue
       const f = map[ef.key]
-      if (f) f.value = ef.value
-      else if (ef.value.trim()) map[ef.key] = { type: 'input', name: ef.label, value: ef.value.trim() }
+      const v = ef.value.trim()
+      if (f) {
+        if (v) f.value = v
+        else delete map[ef.key]
+      } else if (v) {
+        map[ef.key] = { type: 'input', name: ef.label, value: v }
+      }
     }
   }
   editDialog.value = false
@@ -680,6 +733,22 @@ const addIsPolygon = ref(false)
 const addType = ref('')
 /** 矩形新增时除类型外的属性值（key 同 CAD_RECT_ATTR_FIELDS，留空不写入） */
 const addAttrs = ref<Record<string, string>>({})
+/** 当前新增类型的细化规则：决定属性字段显隐与必填/格式校验 */
+const addRule = computed(() => typeRuleFor(addIsPolygon.value, addType.value))
+/** 新增弹框逐字段行内错误提示；规则同编辑弹框：提交前只报格式错，提交后补显空必填 */
+const addErrors = ref<Record<string, string>>({})
+let addSubmitted = false
+
+function refreshAddErrors() {
+  const errs = collectRuleErrors(addRule.value, (k) => addAttrs.value[k] ?? '')
+  if (!addSubmitted) {
+    for (const k of addRule.value.required) if (!(addAttrs.value[k] ?? '').trim()) delete errs[k]
+  }
+  addErrors.value = errs
+}
+watch([addAttrs, addType], refreshAddErrors, { deep: true })
+/** 新增弹框展示全部标准属性字段：当前类型不适用的置灰禁用，而非隐藏 */
+const addFields = computed(() => (addIsPolygon.value ? [] : [...CAD_RECT_ATTR_FIELDS]))
 const pendingBox = ref<{ box: CadBox; imageIndex: number } | null>(null)
 let rectDrawing = false
 let suppressNextClick = false
@@ -1120,6 +1189,8 @@ function openAddDialog(
   addIsPolygon.value = shape === 'polygon'
   addType.value = ''
   addAttrs.value = {}
+  addSubmitted = false
+  addErrors.value = {}
   stopDraw()
   addDialog.value = true
 }
@@ -1127,6 +1198,7 @@ function openAddDialog(
 function cancelAdd() {
   addDialog.value = false
   pendingBox.value = null
+  addErrors.value = {}
 }
 
 /** 同类形状（矩形/多边形）下一个序号：扫描当前已显示名称里的最大数字 +1 */
@@ -1147,10 +1219,15 @@ async function submitAdd() {
   const src = ann.value
   if (!pb || !src) return
   const { box, imageIndex } = pb
+  // 类型细化校验：必填 → 格式 → 上下公差关系，不通过不关弹框，错误在对应表单项下方行内标红
+  addSubmitted = true
+  refreshAddErrors()
+  if (Object.keys(addErrors.value).length) return
   const content: CadFormMap = { type: { type: 'radio', name: '类型', value: addType.value } }
   if (!addIsPolygon.value) {
-    // 矩形：按需写入非空属性（数值/上下公差/基准/螺纹代号/公差等级），留空字段不落盘
-    for (const f of CAD_RECT_ATTR_FIELDS) {
+    // 矩形：只写当前类型规则内且非空的属性（置灰禁用的字段不落盘），留空字段不落盘
+    for (const f of addFields.value) {
+      if (!addRule.value.fields.includes(f.key)) continue
       const v = (addAttrs.value[f.key] || '').trim()
       if (v) content[f.key] = { type: 'input', name: f.label, value: v }
     }
@@ -1873,7 +1950,7 @@ watch(rawKey, load)
         <el-form-item label="名称">
           <el-input :model-value="editBox?.name || ''" disabled />
         </el-form-item>
-        <el-form-item v-if="editHasType" label="类型">
+        <el-form-item v-if="editHasType" label="类型" :error="editTypeErr">
           <div class="type-radios">
             <el-radio-group v-model="editType">
               <el-radio v-for="o in typeOptions" :key="o.code" :value="o.code">{{ o.label }}</el-radio>
@@ -1881,8 +1958,8 @@ watch(rawKey, load)
           </div>
         </el-form-item>
         <div v-if="editFields.length" class="attr-grid">
-          <el-form-item v-for="ef in editFields" :key="ef.key" :label="ef.label">
-            <el-input v-model="ef.value" clearable />
+          <el-form-item v-for="ef in editFields" :key="ef.key" :label="ef.label" :required="editRule.required.includes(ef.key)" :error="editErrors[ef.key]">
+            <el-input v-model="ef.value" :disabled="!editFieldEnabled(ef.key)" clearable />
           </el-form-item>
         </div>
         <div v-if="!editHasType && !editFields.length" class="edit-empty">该标注无可编辑属性</div>
@@ -1906,9 +1983,14 @@ watch(rawKey, load)
             </el-radio-group>
           </div>
         </el-form-item>
-        <div v-if="!addIsPolygon" class="attr-grid">
-          <el-form-item v-for="f in CAD_RECT_ATTR_FIELDS" :key="f.key" :label="f.label">
-            <el-input v-model="addAttrs[f.key]" :placeholder="`请输入${f.label}（可选）`" clearable />
+        <div v-if="!addIsPolygon && addFields.length" class="attr-grid">
+          <el-form-item v-for="f in addFields" :key="f.key" :label="f.label" :required="addRule.required.includes(f.key)" :error="addErrors[f.key]">
+            <el-input
+              v-model="addAttrs[f.key]"
+              :disabled="!addRule.fields.includes(f.key)"
+              :placeholder="addRule.required.includes(f.key) ? `请输入${f.label}` : `请输入${f.label}（可选）`"
+              clearable
+            />
           </el-form-item>
         </div>
       </el-form>

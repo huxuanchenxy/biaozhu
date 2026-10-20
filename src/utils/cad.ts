@@ -433,6 +433,164 @@ export const CAD_RECT_ATTR_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'tolerance-grade', label: '公差等级' },
 ]
 
+/* ------------------------------------------------------------------
+ * 类型细化规则：每个矩形类型可填哪些属性（fields）、哪些必填（required）、
+ * 各字段的格式校验器（validators）。规则按机械制图标注惯例（GB/T 尺寸标注、
+ * GD&T 形位公差有/无基准之分、螺纹代号规范等）推导，如需调整只改这张表，
+ * 新增/编辑弹框的字段显隐与保存校验都会随它生效。
+ * ------------------------------------------------------------------ */
+
+/** 属性值格式校验器种类（text 表示只查必填不查格式） */
+export type CadAttrValidator = 'number' | 'integer' | 'deviation' | 'angle' | 'gdt' | 'thread' | 'datum' | 'itGrade' | 'text'
+
+/** 某类型的属性字段规则 */
+export interface CadTypeRule {
+  /** 该类型允许显示/填写的属性字段 key（不在列表内的标准字段编辑时隐藏，磁盘上的旧值不删） */
+  fields: string[]
+  /** fields 中必须非空的子集 */
+  required: string[]
+  /** 字段 key → 格式校验器；required 的字段必须有值才会被校验 */
+  validators: Record<string, CadAttrValidator>
+}
+
+function rectRule(
+  fields: string[],
+  required: string[] = [],
+  validators: Record<string, CadAttrValidator> = {},
+): CadTypeRule {
+  return { fields, required, validators }
+}
+
+const UPPER = 'upper-deviation'
+const LOWER = 'lower-deviation'
+/** 线性/半径/直径：数值 + 上下公差全必填，数值系格式 */
+const TOL_LINEAR = rectRule(['value', UPPER, LOWER, 'tolerance-grade'], ['value', UPPER, LOWER], {
+  value: 'number',
+  [UPPER]: 'deviation',
+  [LOWER]: 'deviation',
+  'tolerance-grade': 'itGrade',
+})
+/** 尺寸类（无公差）：仅数值必填 */
+const DIM_ONLY = rectRule(['value'], ['value'], { value: 'number' })
+/** GD&T 形状公差（无基准）：数值必填，公差带宽度 */
+const GDT_FORM = rectRule(['value'], ['value'], { value: 'gdt' })
+/** GD&T 方向/位置/跳动/轮廓度（带基准）：数值 + 基准必填 */
+const GDT_DATUM = rectRule(['value', 'datum'], ['value', 'datum'], { value: 'gdt', datum: 'datum' })
+
+export const RECT_TYPE_RULES: Record<string, CadTypeRule> = {
+  /* ---- 尺寸类 ---- */
+  'general-linear-dimension': DIM_ONLY,
+  'linear-dimension-tolerance': TOL_LINEAR,
+  'radius-dimension': DIM_ONLY,
+  'radius-tolerance': TOL_LINEAR,
+  'diameter-dimension': DIM_ONLY,
+  'diameter-tolerance': TOL_LINEAR,
+  'angular-dimension': rectRule(['value'], ['value'], { value: 'angle' }),
+  'angular-tolerance': rectRule(['value', UPPER, LOWER], ['value', UPPER, LOWER], {
+    value: 'angle',
+    [UPPER]: 'angle',
+    [LOWER]: 'angle',
+  }),
+  // 倒角常写“2×45°”，不做纯数值格式校验
+  'chamfer-dimension': rectRule(['value'], ['value']),
+  'chamfer-tolerance': rectRule(['value', UPPER, LOWER], ['value', UPPER, LOWER], {
+    [UPPER]: 'deviation',
+    [LOWER]: 'deviation',
+  }),
+  /* ---- 螺纹类 ---- */
+  'thread-designation': rectRule(['thread-designation'], ['thread-designation'], { 'thread-designation': 'thread' }),
+  'thread-tolerance': rectRule(['thread-designation', 'tolerance-grade'], ['thread-designation'], {
+    'thread-designation': 'thread',
+    'tolerance-grade': 'text',
+  }),
+  /* ---- 符号类 ---- */
+  // 粗糙度可写 Ra3.2 / 3.2，格式放开
+  'surface-roughness-symbol-and-parameters': rectRule(['value'], ['value']),
+  'welding-symbol': rectRule(['value']),
+  'weld-location-number': rectRule(['value'], ['value'], { value: 'integer' }),
+  'welding-inspection-ndt-notes': rectRule(['value']),
+  'datum-symbol': rectRule(['datum'], ['datum'], { datum: 'datum' }),
+  'datum-target': rectRule(['datum', 'value'], ['datum'], { datum: 'datum', value: 'number' }),
+  'view-section-identification': rectRule(['value'], ['value']),
+  'balloon-number': rectRule(['value'], ['value'], { value: 'integer' }),
+  'technical-requirements-block': rectRule(['value'], ['value']),
+  'nozzle': rectRule(['value'], ['value']),
+  /* ---- GD&T 形状公差（无基准） ---- */
+  straightness: GDT_FORM,
+  flatness: GDT_FORM,
+  roundness: GDT_FORM,
+  cylindricity: GDT_FORM,
+  /* ---- GD&T 方向/位置/跳动/轮廓度（带基准） ---- */
+  parallelism: GDT_DATUM,
+  perpendicularity: GDT_DATUM,
+  angularity: GDT_DATUM,
+  'position-tolerance': GDT_DATUM,
+  coaxiality: GDT_DATUM,
+  symmetry: GDT_DATUM,
+  'circular-runout': GDT_DATUM,
+  'total-runout': GDT_DATUM,
+  'profile-of-a-line': GDT_DATUM,
+  'profile-of-a-surface': GDT_DATUM,
+}
+
+/** 多边形（剖面线/填充区域）无属性字段，只要求类型本身 */
+export const POLYGON_TYPE_RULE: CadTypeRule = { fields: [], required: [], validators: {} }
+
+/** 未收录代码的兜底规则：全部字段可填、不强制，避免新类型被规则卡死 */
+const DEFAULT_RECT_RULE: CadTypeRule = rectRule(CAD_RECT_ATTR_FIELDS.map((f) => f.key))
+
+/** 取矩形类型的细化规则；未收录回退兜底 */
+export function rectTypeRule(code: string): CadTypeRule {
+  return RECT_TYPE_RULES[code] ?? DEFAULT_RECT_RULE
+}
+
+/** 按形状取规则：多边形统一空字段，矩形查类型表 */
+export function typeRuleFor(isPolygon: boolean, typeCode: string): CadTypeRule {
+  return isPolygon ? POLYGON_TYPE_RULE : rectTypeRule(typeCode)
+}
+
+const ATTR_VALIDATOR_CHECKS: Record<Exclude<CadAttrValidator, 'text'>, { msg: string; test: (s: string) => boolean }> = {
+  number: { msg: '必须是数字（可带负号与小数），如 30、-0.5、12.75', test: (s) => /^-?\d+(\.\d+)?$/.test(s) },
+  integer: { msg: '必须是整数编号，如 12', test: (s) => /^\d+$/.test(s) },
+  deviation: { msg: '应为数值公差，可带符号或 ±，如 +0.05、-0.02、±0.1', test: (s) => /^[±]?[+-]?\d+(\.\d+)?$/.test(s) },
+  angle: { msg: '应为角度值（可含 ° ′ ″），如 45、30.5、45°、1°30′', test: (s) => /\d/.test(s) && /^-?[\d.,°′″'" ]+$/.test(s) },
+  gdt: { msg: '应为公差带宽度数值，可带 φ 与最大实体 M 前/后缀，如 0.2、φ0.1、φ0.2M', test: (s) => /^[Φφ⌀]?\d+(\.\d+)?[Mm]?$/.test(s) },
+  thread: {
+    msg: '应为螺纹代号，如 M12x1.75-6H、G1/2、NPT3/4、Tr40x7',
+    test: (s) => /^[A-Za-z][A-Za-z0-9\s./×xX-]*$/.test(s) && (/[0-9]/.test(s) || s.includes('/')),
+  },
+  datum: { msg: '应为大写基准字母，多个用 - 连接，如 A、A-B', test: (s) => /^[A-Z](-[A-Z])?$/.test(s) },
+  itGrade: { msg: '公差等级形如 IT7（可带字母带号，如 H7、6H）', test: (s) => /^(IT\d+|\d+[HhGgDdA-Za-z]|[A-Za-z]\d+)$/i.test(s) },
+}
+
+/**
+ * 按类型规则逐字段收集校验错误，供表单项下方的行内红色提示展示。
+ * get 提供「字段 key → 当前值」；返回 { 字段key: 错误信息 }，全部通过则为空对象。
+ * 必填 → 格式 → 上下公差大小关系；关系类错误记在「下公差」字段上。
+ */
+export function collectRuleErrors(rule: CadTypeRule, get: (key: string) => string): Record<string, string> {
+  const errs: Record<string, string> = {}
+  for (const k of rule.required) {
+    if (!get(k).trim()) errs[k] = '必填项'
+  }
+  for (const [k, v] of Object.entries(rule.validators)) {
+    if (v === 'text' || errs[k]) continue
+    const s = get(k).trim()
+    if (!s) continue
+    const chk = ATTR_VALIDATOR_CHECKS[v]
+    if (chk && !chk.test(s)) errs[k] = chk.msg
+  }
+  // 上下公差都填了纯数值时，检查大小关系（±对称写法跳过）
+  const u = get(UPPER).trim()
+  const l = get(LOWER).trim()
+  if (u && l && !u.startsWith('±') && !l.startsWith('±')) {
+    const nu = Number(u.replace(/^\+/, ''))
+    const nl = Number(l.replace(/^\+/, ''))
+    if (Number.isFinite(nu) && Number.isFinite(nl) && nu < nl && !errs[LOWER]) errs[LOWER] = '上公差应不小于下公差'
+  }
+  return errs
+}
+
 /**
  * 写回 annotations.json（覆盖 MinIO 上的原对象）。
  * 编辑/删除后把内存里的整份 CadAnnotations 原样序列化上传。
