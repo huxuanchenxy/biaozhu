@@ -675,7 +675,7 @@ async function deleteBox(row: AnnRow) {
   // 删除是明确意图：直接弹删除确认，不再前置询问几何改动如何处理。
   // 但若正处于几何编辑且有未保存修改，删除会整份写回，故在确认后先放弃这些几何改动（就地回滚快照并退出编辑），
   // 避免其它标注框未保存的几何被静默落盘（回滚只改坐标、不换引用，row.box 仍在源数组中，删除照常进行）。
-  const hasPendingGeom = editDirty.value
+  const hasPendingGeom = hasPendingChanges.value
   try {
     await ElMessageBox.confirm(
       hasPendingGeom
@@ -687,9 +687,9 @@ async function deleteBox(row: AnnRow) {
   } catch {
     return
   }
-  // 确认删除后：先放弃未保存的几何修改（就地回滚快照并清空状态）
+  // 确认删除后：先放弃未保存的改动（还原几何 + 移除待保存的粘贴新增，并清空状态）
   if (hasPendingGeom) {
-    restoreGeometry()
+    revertPendingChanges()
     clearGeomEdit()
   }
   const src = ann.value
@@ -704,7 +704,7 @@ async function deleteBox(row: AnnRow) {
     }
     return false
   }
-  const ok = removeFrom(src.splitedAnnotation?.content) || removeFrom(src.splitedAnnotationPolygon?.content)
+  removeFrom(src.splitedAnnotation?.content) || removeFrom(src.splitedAnnotationPolygon?.content)
   // 同步 UI：从各图 boxes 中移除
   for (const img of images.value) {
     const j = img.boxes.indexOf(row.box)
@@ -712,10 +712,6 @@ async function deleteBox(row: AnnRow) {
   }
   if (activeBox.value === row.box) activeBox.value = null
   if (hoverBox.value === row.box) hoverBox.value = null
-  if (!ok) {
-    ElMessage.warning('未在源数据中找到该标注，未写回')
-    return
-  }
   await persist('已删除标注')
 }
 
@@ -799,9 +795,9 @@ function toggleDraw(img: CadImage, shape: DrawShape) {
     stopDraw()
     return
   }
-  // 绘制与几何修改互斥：开始绘制前静默放弃未保存的几何修改
-  if (editDirty.value) {
-    restoreGeometry()
+  // 绘制与未保存改动互斥：开始绘制前静默放弃（还原几何 + 移除待保存的粘贴新增）
+  if (hasPendingChanges.value) {
+    revertPendingChanges()
     clearGeomEdit()
     activeBox.value = null
   }
@@ -882,10 +878,10 @@ function restoreGeometry() {
  * 返回：'none' 无未保存几何（直接继续）；否则 'save' 保存几何并继续 / 'discard' 放弃并继续 / 'abort' 取消整个操作。
  */
 async function resolveGeomConflict(): Promise<'save' | 'discard' | 'abort' | 'none'> {
-  if (!editDirty.value) return 'none'
+  if (!hasPendingChanges.value) return 'none'
   try {
     await ElMessageBox.confirm(
-      '当前标注有未保存的几何修改，继续操作前请先选择如何处理这些几何改动：',
+      '当前有未保存的改动（几何/粘贴新增），继续操作前请先选择如何处理：',
       '未保存的几何修改',
       {
         type: 'warning',
@@ -909,9 +905,9 @@ async function resolveGeomConflict(): Promise<'save' | 'discard' | 'abort' | 'no
  */
 async function settleGeomConflict(decision: 'save' | 'discard' | 'none'): Promise<boolean> {
   if (decision === 'save') {
-    if (!(await persist('已保存几何'))) return false
+    if (!(await persist('已保存修改'))) return false
   } else if (decision === 'discard') {
-    restoreGeometry()
+    revertPendingChanges()
   }
   clearGeomEdit()
   return true
@@ -923,30 +919,77 @@ function ensureGeomSnapshot() {
   geomSnapshot = snapshotGeometry()
 }
 
-/** 清空一次几何修改的临时状态（快照/脏标记/拖拽）；无改动时为幂等空操作 */
+/** 本次会话中通过粘贴新增、尚未写回的框（放弃时据此从数据里移除） */
+const pendingPasteBoxes = ref<CadBox[]>([])
+/** 是否有未保存改动：几何被拖动 或 有粘贴新增待落盘 */
+const hasPendingChanges = computed(() => editDirty.value || pendingPasteBoxes.value.length > 0)
+
+/** 移除所有待保存的粘贴新增框（从源数组与各图 boxes 中删掉） */
+function removePastedBoxes() {
+  if (!pendingPasteBoxes.value.length) return
+  const src = ann.value
+  for (const box of pendingPasteBoxes.value) {
+    if (src) {
+      const rc = src.splitedAnnotation?.content
+      const pc = src.splitedAnnotationPolygon?.content
+      if (rc) {
+        const i = rc.indexOf(box)
+        if (i >= 0) rc.splice(i, 1)
+      }
+      if (pc) {
+        const i = pc.indexOf(box)
+        if (i >= 0) pc.splice(i, 1)
+      }
+    }
+    for (const im of images.value) {
+      const i = im.boxes.indexOf(box)
+      if (i >= 0) im.boxes.splice(i, 1)
+    }
+    if (activeBox.value === box) activeBox.value = null
+    if (hoverBox.value === box) hoverBox.value = null
+  }
+  pendingPasteBoxes.value = []
+}
+
+/** 回滚全部未保存改动：几何就地还原 + 移除待保存的粘贴新增 */
+function revertPendingChanges() {
+  restoreGeometry()
+  removePastedBoxes()
+}
+
+/** 清空未保存状态的跟踪（保存成功后调用：保留数据，仅忘记快照/脏标记/粘贴清单） */
 function clearGeomEdit() {
   geomSnapshot = null
   editDirty.value = false
   geomDirtyKey.value = ''
+  pendingPasteBoxes.value = []
   geomDrag = null
   geomDragging.value = false
 }
 
-/** 保存：把修改后的整份 annotations 写回 MinIO，成功后清空快照 */
+/** 某张图是否有待保存改动（几何拖动或粘贴新增），据此把保存/放弃条与提示锁定到对应图 */
+function hasPendingOn(img: CadImage): boolean {
+  return (
+    (editDirty.value && geomDirtyKey.value === img.key) ||
+    pendingPasteBoxes.value.some((b) => img.boxes.includes(b))
+  )
+}
+
+/** 保存：把含几何改动与粘贴新增的整份 annotations 写回 MinIO，成功后清空待保存状态 */
 async function saveGeom() {
-  if (!editDirty.value) {
+  if (!hasPendingChanges.value) {
     clearGeomEdit()
     return
   }
-  const ok = await persist('已保存几何')
+  const ok = await persist('已保存修改')
   if (ok) clearGeomEdit()
 }
 
-/** 放弃：有未保存修改时二次确认，确认后就地还原几何快照 */
+/** 放弃：有未保存改动时二次确认，确认后还原几何并移除粘贴新增 */
 async function discardGeom() {
-  if (editDirty.value) {
+  if (hasPendingChanges.value) {
     try {
-      await ElMessageBox.confirm('有未保存的几何修改，放弃并回滚到改动前？', '放弃几何修改', {
+      await ElMessageBox.confirm('有未保存的改动（几何/粘贴新增），放弃并回滚到改动前？', '放弃修改', {
         type: 'warning',
         confirmButtonText: '放弃修改',
         cancelButtonText: '继续编辑',
@@ -955,7 +998,7 @@ async function discardGeom() {
       return
     }
   }
-  restoreGeometry()
+  revertPendingChanges()
   clearGeomEdit()
 }
 
@@ -1263,6 +1306,66 @@ async function submitAdd() {
   activeBox.value = box
   scrollToRow(box)
   await persist('已新增标注')
+}
+
+/* ---- 复制 / 粘贴（Ctrl+C / Ctrl+V）---- */
+/** 剪贴板：存被复制框的深拷贝、归属图片下标，count 让连续粘贴逐次错开不重叠 */
+let clipboard: { box: CadBox; imageIndex: number; count: number } | null = null
+
+/** 深拷贝一个框（toRaw + JSON，剥离响应式代理，避免与原框共享引用） */
+function cloneBox(b: CadBox): CadBox {
+  return JSON.parse(JSON.stringify(toRaw(b))) as CadBox
+}
+
+/** 复制当前选中标注到剪贴板 */
+function copyActiveBox() {
+  const box = activeBox.value
+  if (!box) return
+  const imageIndex = images.value.findIndex((im) => im.boxes.includes(box))
+  if (imageIndex < 0) return
+  clipboard = { box: cloneBox(box), imageIndex, count: 0 }
+  ElMessage.success(`已复制「${box.name || boxShapeLabel(box)}」`)
+}
+
+/** 粘贴：复制剪贴板框，赋新 uuid、重命名、按次数错位，加入源数组与该图并写回 */
+async function pasteClipboard() {
+  const src = ann.value
+  if (!clipboard || !src) return
+  const img = images.value[clipboard.imageIndex]
+  if (!img) {
+    ElMessage.warning('原图片已不在，无法粘贴')
+    return
+  }
+  clipboard.count += 1
+  const isPoly = isPolygonBox(clipboard.box)
+  const box = cloneBox(clipboard.box)
+  box.uuid = genUuid()
+  box.name = `${isPoly ? '多边形' : '矩形'}-${nextShapeSeq(isPoly)}`
+  const dx = Math.round((Number(box.width) || 120) * 0.06) + 15 * clipboard.count
+  const dy = Math.round((Number(box.height) || 120) * 0.06) + 15 * clipboard.count
+  box.x = (Number(box.x) || 0) + dx
+  box.y = (Number(box.y) || 0) + dy
+  if (Array.isArray(box.points)) {
+    for (let k = 0; k + 1 < box.points.length; k += 2) {
+      box.points[k] += dx
+      box.points[k + 1] += dy
+    }
+  }
+  if (isPoly) {
+    if (!src.splitedAnnotationPolygon) src.splitedAnnotationPolygon = { content: [] }
+    if (!src.splitedAnnotationPolygon.content) src.splitedAnnotationPolygon.content = []
+    src.splitedAnnotationPolygon.content.push(box)
+  } else {
+    if (!src.splitedAnnotation) src.splitedAnnotation = { content: [] }
+    if (!src.splitedAnnotation.content) src.splitedAnnotation.content = []
+    src.splitedAnnotation.content.push(box)
+  }
+  img.boxes.push(box)
+  activeBox.value = box
+  scrollToRow(box)
+  // 粘贴不直接写盘：登记到待保存清单，与几何改动共用同一条「保存/放弃」入口
+  pendingPasteBoxes.value.push(box)
+  ElMessage.success(`已粘贴「${box.name}」，改动待保存`)
 }
 
 /**
@@ -1597,8 +1700,8 @@ function onWindowKeyDown(e: KeyboardEvent) {
   // Esc：绘制中（矩形/多边形）取消退出；弹框打开时交给弹框自身处理
   if (e.key === 'Escape') {
     if (editDialog.value || addDialog.value) return
-    // 有未保存的几何修改：Esc 放弃并回滚（弹确认）
-    if (editDirty.value) {
+    // 有未保存的改动（几何/粘贴）：Esc 放弃并回滚（弹确认）
+    if (hasPendingChanges.value) {
       discardGeom()
       return
     }
@@ -1608,6 +1711,26 @@ function onWindowKeyDown(e: KeyboardEvent) {
       stopDraw()
       ElMessage.info('已取消绘制')
     }
+    return
+  }
+  // Ctrl/Cmd + C / V：复制 / 粘贴当前选中标注（弹框打开或焦点在输入框时不拦截，交给浏览器原生）
+  const mod = e.ctrlKey || e.metaKey
+  if (mod && (e.key === 'c' || e.key === 'C')) {
+    if (editDialog.value || addDialog.value) return
+    const tc = e.target as HTMLElement | null
+    if (tc && (tc.tagName === 'INPUT' || tc.tagName === 'TEXTAREA' || tc.isContentEditable)) return
+    if (!activeBox.value) return
+    e.preventDefault()
+    copyActiveBox()
+    return
+  }
+  if (mod && (e.key === 'v' || e.key === 'V')) {
+    if (editDialog.value || addDialog.value) return
+    const tv = e.target as HTMLElement | null
+    if (tv && (tv.tagName === 'INPUT' || tv.tagName === 'TEXTAREA' || tv.isContentEditable)) return
+    if (!clipboard) return
+    e.preventDefault()
+    pasteClipboard()
     return
   }
   if (e.key !== 'Delete') return
@@ -1666,7 +1789,7 @@ watch(rawKey, load)
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
         <el-checkbox v-model="showNames" size="small">显示名称</el-checkbox>
-        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中按 Delete 删除</span>
+        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中后 Ctrl+C/Ctrl+V 复制粘贴、Delete 删除</span>
       </div>
 
       <div
@@ -1722,29 +1845,29 @@ watch(rawKey, load)
                 ◇ 多边形
               </el-button>
             </span>
-            <span v-if="editDirty && geomDirtyKey === img.key" class="add-group edit-group">
-              <span class="add-group-label">✎ 几何</span>
+            <span v-if="hasPendingOn(img)" class="add-group edit-group">
+              <span class="add-group-label">✎ 待保存</span>
               <el-button
                 size="small"
                 round
                 type="success"
                 :loading="saving"
-                title="保存本次几何修改并写回 MinIO"
+                title="保存本次改动（几何/粘贴）并写回 MinIO"
                 @click.stop="saveGeom"
               >
-                💾 保存几何
+                💾 保存修改
               </el-button>
-              <el-button size="small" round title="放弃未保存的几何修改并回滚" @click.stop="discardGeom">
+              <el-button size="small" round title="放弃未保存的改动并回滚" @click.stop="discardGeom">
                 ↩ 放弃
               </el-button>
             </span>
           </div>
           <div
-            v-if="(activeBox && img.boxes.includes(activeBox)) || (editDirty && geomDirtyKey === img.key)"
+            v-if="(activeBox && img.boxes.includes(activeBox)) || hasPendingOn(img)"
             class="draw-bar edit-bar"
           >
             <span class="draw-tip">
-              选中框：拖动框体平移，拖角点改大小；空白处/未选中框拖动平移整图，滚轮缩放。改动后点「保存几何」写回，Esc/「放弃」回滚
+              选中框：拖动框体平移，拖角点改大小；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
