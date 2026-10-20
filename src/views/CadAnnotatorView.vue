@@ -229,26 +229,24 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     return
   }
   if (drawMode[img.key] === 'polygon') return // 多边形顶点在 click 里累加
-  // 几何编辑模式：先命中当前选中框的手柄→缩放；否则命中框体→平移（均按自然坐标算）
-  if (editMode[img.key]) {
-    if (editDialog.value) return // 方案B：属性弹框打开期间挂起左栏几何拖拽/手柄交互
-    const pt = naturalPoint(img, e)
-    if (!pt) return
+  // 选中即拖：弹框打开时挂起；否则按在当前选中框的手柄→缩放、框体→平移该框；
+  // 未选中任何框、或按在选中框之外（含未选中的框、空白处）→落到下面的整图平移，不影响拖动/缩放
+  if (!editDialog.value && !addDialog.value) {
     const ab = activeBox.value
     if (ab && img.boxes.includes(ab)) {
-      const vi = vertexIndexAt(img, ab, pt)
-      if (vi >= 0) {
-        startVertexDrag(ab, img, vi, e, pt)
-        return
+      const pt = naturalPoint(img, e)
+      if (pt) {
+        const vi = vertexIndexAt(img, ab, pt)
+        if (vi >= 0) {
+          startVertexDrag(ab, img, vi, e, pt)
+          return
+        }
+        if (boxAtPoint([ab], pt.x, pt.y) === ab) {
+          startShapeDrag(ab, img, e, pt)
+          return
+        }
       }
     }
-    const hit = boxAtPoint(
-      boxesForImage(img).map((b) => b.box),
-      pt.x,
-      pt.y,
-    )
-    if (hit) startShapeDrag(hit, img, e, pt)
-    return
   }
   cancelPan(img.key) // 手动平移时中断自动平移动画
   const t = tf(img.key)
@@ -281,6 +279,8 @@ function onWindowMouseUp() {
   if (geomDrag) {
     geomDrag = null
     geomDragging.value = false
+    // 只点选未实际移动：丢弃惰性快照，避免留下空的"待保存"状态
+    if (!editDirty.value) geomSnapshot = null
     return
   }
   if (rectDrawing) {
@@ -336,13 +336,14 @@ function onWindowResize() {
   }, 160)
 }
 
-/** 每张图的光标样式：拖动中→grabbing；可拖动区→grab；编辑模式下命中框→move；悬停标注框→pointer */
+/** 每张图的光标样式：拖动中→grabbing；选中框悬停→move；其它框悬停→pointer；空白→grab(平移) */
 function cursorFor(key: string): string {
   if (drawMode[key]) return 'crosshair'
   if (geomDragging.value) return 'grabbing'
-  if (editMode[key]) return hover.show && hover.key === key && hoverBox.value ? 'move' : 'default'
   if (dragging.value && drag && drag.key === key) return 'grabbing'
-  return hover.show && hover.key === key && hoverBox.value ? 'pointer' : 'grab'
+  if (hover.show && hover.key === key && hoverBox.value)
+    return activeBox.value === hoverBox.value ? 'move' : 'pointer'
+  return 'grab'
 }
 
 /** 叠加层尺寸基准：viewBox 为自然像素，按图宽归一（以 1000px 为 1 单）使线宽/字体不随图大小差异 */
@@ -672,7 +673,7 @@ async function deleteBox(row: AnnRow) {
   // 删除是明确意图：直接弹删除确认，不再前置询问几何改动如何处理。
   // 但若正处于几何编辑且有未保存修改，删除会整份写回，故在确认后先放弃这些几何改动（就地回滚快照并退出编辑），
   // 避免其它标注框未保存的几何被静默落盘（回滚只改坐标、不换引用，row.box 仍在源数组中，删除照常进行）。
-  const hasPendingGeom = Object.values(editMode).some(Boolean) && editDirty.value
+  const hasPendingGeom = editDirty.value
   try {
     await ElMessageBox.confirm(
       hasPendingGeom
@@ -684,10 +685,10 @@ async function deleteBox(row: AnnRow) {
   } catch {
     return
   }
-  // 确认删除后：先放弃未保存的几何修改并退出编辑态（必须在 exitEdit 前调用，exitEdit 会清空快照）
+  // 确认删除后：先放弃未保存的几何修改（就地回滚快照并清空状态）
   if (hasPendingGeom) {
     restoreGeometry()
-    exitEdit()
+    clearGeomEdit()
   }
   const src = ann.value
   if (!src) return
@@ -796,12 +797,10 @@ function toggleDraw(img: CadImage, shape: DrawShape) {
     stopDraw()
     return
   }
-  // 绘制与几何编辑互斥：开始绘制前静默放弃未保存的几何修改并退出编辑
-  if (editMode[key]) {
+  // 绘制与几何修改互斥：开始绘制前静默放弃未保存的几何修改
+  if (editDirty.value) {
     restoreGeometry()
-    geomSnapshot = null
-    editDirty.value = false
-    editMode[key] = false
+    clearGeomEdit()
     activeBox.value = null
   }
   stopDraw()
@@ -822,11 +821,11 @@ function stopDraw() {
 }
 
 /* ------------------------------------------------------------------
- * 几何编辑：「修改几何」后可拖动标注框整体平移，拖动顶点改变大小
- *  （矩形四角缩放，多边形逐顶点变形）；「保存几何」写回 MinIO，
- *  取消/Esc 用进入时的快照回滚。
+ * 几何编辑（选中即拖，无模式开关）：选中某框后可直接拖动其整体平移、
+ *  拖角点改大小（矩形四角缩放、多边形逐顶点变形）；空白处/未选中框照常平移整图，
+ *  滚轮缩放不受影响。首次改动前惰性快照全部框，「保存几何」写回 MinIO，
+ *  「放弃」/Esc 用快照就地回滚。
  * ------------------------------------------------------------------ */
-const editMode = reactive<Record<string, boolean>>({})
 /** 进入编辑时的几何快照：按框对象引用记录几何字段，回滚时就地还原（不换引用，不依赖 uuid） */
 interface GeomSnap {
   x?: number
@@ -838,6 +837,8 @@ interface GeomSnap {
 }
 let geomSnapshot: Map<CadBox, GeomSnap> | null = null
 const editDirty = ref(false)
+/** 发生未保存几何改动的图片 key：使提示条/保存入口锁定在被改的那张图（全局快照仅一份） */
+const geomDirtyKey = ref('')
 
 /** 收集全部标注（精剪矩形 + 多边形，含未归属的）的几何快照 */
 function snapshotGeometry(): Map<CadBox, GeomSnap> {
@@ -879,8 +880,7 @@ function restoreGeometry() {
  * 返回：'none' 无未保存几何（直接继续）；否则 'save' 保存几何并继续 / 'discard' 放弃并继续 / 'abort' 取消整个操作。
  */
 async function resolveGeomConflict(): Promise<'save' | 'discard' | 'abort' | 'none'> {
-  const editing = Object.values(editMode).some(Boolean)
-  if (!editing || !editDirty.value) return 'none'
+  if (!editDirty.value) return 'none'
   try {
     await ElMessageBox.confirm(
       '当前标注有未保存的几何修改，继续操作前请先选择如何处理这些几何改动：',
@@ -902,8 +902,8 @@ async function resolveGeomConflict(): Promise<'save' | 'discard' | 'abort' | 'no
 
 /**
  * 处理几何冲突决策的收尾：save→写回几何；discard→回滚到快照。
- * 无论哪种决策（含无未保存改动的 'none'），都退出几何编辑态，使左栏「修改几何」按钮复原；
- * 未处于编辑态时 exitEdit 为幂等空操作。返回 false 表示写回失败，调用方应中止后续属性编辑/删除。
+ * 无论哪种决策（含无未保存改动的 'none'），都清空几何修改状态，使「保存/放弃」按钮复原；
+ * 无未保存修改时 clearGeomEdit 为幂等空操作。返回 false 表示写回失败，调用方应中止后续属性编辑/删除。
  */
 async function settleGeomConflict(decision: 'save' | 'discard' | 'none'): Promise<boolean> {
   if (decision === 'save') {
@@ -911,41 +911,40 @@ async function settleGeomConflict(decision: 'save' | 'discard' | 'none'): Promis
   } else if (decision === 'discard') {
     restoreGeometry()
   }
-  exitEdit()
+  clearGeomEdit()
   return true
 }
 
-/** 进入/退出某图的几何编辑：全局互斥，一次只编辑一张图 */
-function toggleEdit(img: CadImage) {
-  const key = img.key
-  if (editMode[key]) {
-    cancelEdit()
-    return
-  }
-  stopDraw()
-  for (const k of Object.keys(editMode)) editMode[k] = false
-  geomSnapshot = ann.value ? snapshotGeometry() : null
-  editDirty.value = false
-  editMode[key] = true
-  selectedIndex.value = images.value.indexOf(img)
-  activeBox.value = null
+/** 首次几何改动前惰性快照全部框（用于「放弃」/Esc 回滚）；已有快照则不重复 */
+function ensureGeomSnapshot() {
+  if (geomSnapshot || !ann.value) return
+  geomSnapshot = snapshotGeometry()
 }
 
-/** 保存：把修改后的整份 annotations 写回 MinIO，成功后退出编辑 */
-async function saveEdit() {
+/** 清空一次几何修改的临时状态（快照/脏标记/拖拽）；无改动时为幂等空操作 */
+function clearGeomEdit() {
+  geomSnapshot = null
+  editDirty.value = false
+  geomDirtyKey.value = ''
+  geomDrag = null
+  geomDragging.value = false
+}
+
+/** 保存：把修改后的整份 annotations 写回 MinIO，成功后清空快照 */
+async function saveGeom() {
   if (!editDirty.value) {
-    exitEdit()
+    clearGeomEdit()
     return
   }
   const ok = await persist('已保存几何')
-  if (ok) exitEdit()
+  if (ok) clearGeomEdit()
 }
 
-/** 取消：有未保存修改时二次确认，确认后就地还原几何快照 */
-async function cancelEdit() {
+/** 放弃：有未保存修改时二次确认，确认后就地还原几何快照 */
+async function discardGeom() {
   if (editDirty.value) {
     try {
-      await ElMessageBox.confirm('有未保存的几何修改，放弃并退出编辑？', '退出编辑', {
+      await ElMessageBox.confirm('有未保存的几何修改，放弃并回滚到改动前？', '放弃几何修改', {
         type: 'warning',
         confirmButtonText: '放弃修改',
         cancelButtonText: '继续编辑',
@@ -955,17 +954,7 @@ async function cancelEdit() {
     }
   }
   restoreGeometry()
-  activeBox.value = null
-  hoverBox.value = null
-  exitEdit()
-}
-
-function exitEdit() {
-  for (const k of Object.keys(editMode)) editMode[k] = false
-  geomSnapshot = null
-  editDirty.value = false
-  geomDrag = null
-  geomDragging.value = false
+  clearGeomEdit()
 }
 
 /* ---- 拖动/缩放交互 ---- */
@@ -1000,7 +989,7 @@ function vertexIndexAt(img: CadImage, box: CadBox, pt: CadCorner): number {
 
 /** 按下框体：整体平移（pt 为阶段层已算好的自然坐标） */
 function startShapeDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorner) {
-  if (!editMode[img.key]) return
+  ensureGeomSnapshot()
   e.preventDefault()
   suppressNextClick = true
   activeBox.value = box
@@ -1023,7 +1012,8 @@ function startShapeDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorner
 
 /** 按下顶点手柄：矩形四角缩放 / 多边形单顶点变形 */
 function startVertexDrag(box: CadBox, img: CadImage, vi: number, e: MouseEvent, pt: CadCorner) {
-  if (!editMode[img.key] || activeBox.value !== box) return
+  if (activeBox.value !== box) return
+  ensureGeomSnapshot()
   e.preventDefault()
   suppressNextClick = true
   geomDrag = {
@@ -1058,6 +1048,7 @@ function geomDragMove(e: MouseEvent) {
   if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
     g.moved = true
     editDirty.value = true
+    geomDirtyKey.value = g.key
   }
   if (g.mode === 'move') {
     box.x = g.ox + dx
@@ -1561,9 +1552,9 @@ function onWindowKeyDown(e: KeyboardEvent) {
   // Esc：绘制中（矩形/多边形）取消退出；弹框打开时交给弹框自身处理
   if (e.key === 'Escape') {
     if (editDialog.value || addDialog.value) return
-    // 编辑模式：Esc 退出（有未保存修改时弹确认）
-    if (Object.values(editMode).some(Boolean)) {
-      cancelEdit()
+    // 有未保存的几何修改：Esc 放弃并回滚（弹确认）
+    if (editDirty.value) {
+      discardGeom()
       return
     }
     const drawing = draft.shape !== '' || Object.values(drawMode).some((m) => m !== '')
@@ -1629,7 +1620,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
-        <span class="toolbar-hint">双击还原图片大小 ・ 单击框可联动右栏 ・ 可新增矩形或多边形 ・「修改几何」可拖动/改大小・ 选中按Delete键可删除几何图形</span>
+        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中按 Delete 删除</span>
       </div>
 
       <div
@@ -1685,25 +1676,29 @@ watch(rawKey, load)
                 ◇ 多边形
               </el-button>
             </span>
-            <span class="add-group edit-group">
-              <span class="add-group-label">✎ 编辑</span>
+            <span v-if="editDirty && geomDirtyKey === img.key" class="add-group edit-group">
+              <span class="add-group-label">✎ 几何</span>
               <el-button
                 size="small"
                 round
-                :disabled="!!drawMode[img.key]"
-                :loading="editMode[img.key] && saving"
-                :type="editMode[img.key] ? 'primary' : 'default'"
-                :title="editMode[img.key] ? '保存本次几何修改并写回 MinIO' : '修改几何图形：拖动标注框平移、拖角点改大小（不影响属性）'"
-                @click.stop="editMode[img.key] ? saveEdit() : toggleEdit(img)"
+                type="success"
+                :loading="saving"
+                title="保存本次几何修改并写回 MinIO"
+                @click.stop="saveGeom"
               >
-                {{ editMode[img.key] ? '💾 保存几何' : '✎ 修改几何' }}
+                💾 保存几何
               </el-button>
-              <el-button v-if="editMode[img.key]" size="small" round @click.stop="cancelEdit">取消</el-button>
+              <el-button size="small" round title="放弃未保存的几何修改并回滚" @click.stop="discardGeom">
+                ↩ 放弃
+              </el-button>
             </span>
           </div>
-          <div v-if="editMode[img.key]" class="draw-bar edit-bar">
+          <div
+            v-if="(activeBox && img.boxes.includes(activeBox)) || (editDirty && geomDirtyKey === img.key)"
+            class="draw-bar edit-bar"
+          >
             <span class="draw-tip">
-              几何修改模式：拖动框体平移；单击选中后拖动手柄可改变矩形大小 / 多边形顶点（Esc 或「取消」放弃修改）
+              选中框：拖动框体平移，拖角点改大小；空白处/未选中框拖动平移整图，滚轮缩放。改动后点「保存几何」写回，Esc/「放弃」回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
@@ -1772,15 +1767,14 @@ watch(rawKey, load)
                       stroke-linejoin="round"
                     />
                     <!-- 选中框：顶点手柄（编辑模式下常显且可拖拽改大小） -->
-                    <template v-if="activeBox === box">
+                    <template v-if="activeBox === box && showVertices">
                       <circle
-                        v-if="showVertices || editMode[img.key]"
                         v-for="(c, ci) in cornersOf(box)"
                         :key="`v-${ci}`"
-                        :class="['vertex-handle', { 'vertex-handle--drag': editMode[img.key] && !editDialog }]"
+                        :class="['vertex-handle', { 'vertex-handle--drag': !editDialog }]"
                         :cx="c.x"
                         :cy="c.y"
-                        :r="vertexRadius(img.key) * (editMode[img.key] ? 2.4 : 1)"
+                        :r="vertexRadius(img.key) * 2.4"
                         :fill="boxColor(bi)"
                         stroke="#fff"
                         :stroke-width="1.5"
