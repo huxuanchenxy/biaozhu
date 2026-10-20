@@ -236,6 +236,10 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     if (ab && img.boxes.includes(ab)) {
       const pt = naturalPoint(img, e)
       if (pt) {
+        if (rotateHandleHit(img, ab, pt)) {
+          startRotateDrag(ab, img, e, pt)
+          return
+        }
         const vi = vertexIndexAt(img, ab, pt)
         if (vi >= 0) {
           startVertexDrag(ab, img, vi, e, pt)
@@ -341,6 +345,7 @@ function cursorFor(key: string): string {
   if (drawMode[key]) return 'crosshair'
   if (geomDragging.value) return 'grabbing'
   if (dragging.value && drag && drag.key === key) return 'grabbing'
+  if (hoverRotate.value && hover.key === key) return 'pointer'
   if (hover.show && hover.key === key && hoverBox.value)
     return activeBox.value === hoverBox.value ? 'move' : 'pointer'
   return 'grab'
@@ -486,6 +491,8 @@ function singleImageUrl(img: CadImage): string {
 const activeBox = ref<CadBox | null>(null)
 /** 当前悬停命中的标注（图上悬停预览 / 右栏行悬停反向高亮共用） */
 const hoverBox = ref<CadBox | null>(null)
+/** 光标是否正悬停在选中框的旋转手柄上（用于切换光标提示可旋转） */
+const hoverRotate = ref(false)
 /** 本次选中的来源：闪烁只提示用户视线不在的那一侧（点图闪列表行，点列表闪图上的框） */
 const flashSource = ref<'list' | 'img' | ''>('')
 function activateRow(row: (typeof allRows.value)[number]) {
@@ -1007,7 +1014,7 @@ type GeomCorners = Array<{ x: number; y: number }>
 let geomDrag: {
   key: string
   box: CadBox
-  mode: 'move' | 'resize'
+  mode: 'move' | 'resize' | 'rotate'
   vi: number
   sx: number
   sy: number
@@ -1017,6 +1024,12 @@ let geomDrag: {
   oh: number
   orig: GeomCorners
   moved: boolean
+  /** 旋转：拖拽起始时的图形中点（旋转基准，拖拽期间固定） */
+  cx?: number
+  cy?: number
+  /** 旋转：起始光标相对中点的弧度、矩形起始 rotation（度） */
+  startAngle?: number
+  startRotation?: number
 } | null = null
 const geomDragging = ref(false)
 
@@ -1078,6 +1091,57 @@ function startVertexDrag(box: CadBox, img: CadImage, vi: number, e: MouseEvent, 
   geomDragging.value = true
 }
 
+/** 选中框的旋转手柄位置：锤定在图形真实的第一条边（corner0-corner1）中点，沿“背离中心”方向外偏，
+ *  使把手始终贴合图形、随图形一起旋转。返回把手点 hx/hy 与边上锚点 ax/ay（连接线起点）。 */
+function rotateHandlePos(img: CadImage, box: CadBox): { hx: number; hy: number; ax: number; ay: number } {
+  const cs = cornersOf(box)
+  if (!cs.length) return { hx: 0, hy: 0, ax: 0, ay: 0 }
+  const ax = cs.length >= 2 ? (cs[0].x + cs[1].x) / 2 : cs[0].x
+  const ay = cs.length >= 2 ? (cs[0].y + cs[1].y) / 2 : cs[0].y
+  const c = boxCenter(box)
+  let dx = ax - c.x
+  let dy = ay - c.y
+  const len = Math.hypot(dx, dy) || 1
+  const off = 24 * unit(img.key)
+  dx = (dx / len) * off
+  dy = (dy / len) * off
+  return { hx: ax + dx, hy: ay + dy, ax, ay }
+}
+
+/** 光标是否落在旋转手柄的抓取半径内 */
+function rotateHandleHit(img: CadImage, box: CadBox, pt: CadCorner): boolean {
+  const { hx, hy } = rotateHandlePos(img, box)
+  const r = vertexRadius(img.key) * 3.6
+  return (pt.x - hx) ** 2 + (pt.y - hy) ** 2 <= r * r
+}
+
+/** 按下旋转手柄：绕图形中心旋转（矩形改 rotation 并保持中心不动；多边形逐顶点绕形心旋转） */
+function startRotateDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorner) {
+  ensureGeomSnapshot()
+  e.preventDefault()
+  suppressNextClick = true
+  const c = boxCenter(box)
+  geomDrag = {
+    key: img.key,
+    box,
+    mode: 'rotate',
+    vi: -1,
+    sx: pt.x,
+    sy: pt.y,
+    ox: Number(box.x) || 0,
+    oy: Number(box.y) || 0,
+    ow: Number(box.width) || 0,
+    oh: Number(box.height) || 0,
+    orig: cornersOf(box).map((cc) => ({ ...cc })),
+    moved: false,
+    cx: c.x,
+    cy: c.y,
+    startAngle: Math.atan2(pt.y - c.y, pt.x - c.x),
+    startRotation: Number(box.rotation) || 0,
+  }
+  geomDragging.value = true
+}
+
 function geomDragMove(e: MouseEvent) {
   const g = geomDrag
   if (!g) return
@@ -1087,13 +1151,51 @@ function geomDragMove(e: MouseEvent) {
   const dx = pt.x - g.sx
   const dy = pt.y - g.sy
   const box = g.box
-  const rotated = !isPolygonBox(box) && Number(box.rotation) || 0
-  // 带 rotation 的矩形仅支持平移，手柄拖拽（resize）不生效
-  if (g.mode === 'resize' && rotated) return
   if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
     g.moved = true
     editDirty.value = true
     geomDirtyKey.value = g.key
+  }
+  if (g.mode === 'rotate') {
+    const cx = g.cx ?? 0
+    const cy = g.cy ?? 0
+    let delta = Math.atan2(pt.y - cy, pt.x - cx) - (g.startAngle ?? 0)
+    if (e.shiftKey) {
+      const snap = (15 * Math.PI) / 180
+      delta = Math.round(delta / snap) * snap
+    }
+    if (isPolygonBox(box)) {
+      // 多边形无 rotation 字段：逐顶点绕形心旋转 points，并重算外接矩形
+      const cos = Math.cos(delta)
+      const sin = Math.sin(delta)
+      const pts = box.points ?? []
+      for (let k = 0; k + 1 < pts.length; k += 2) {
+        const o = g.orig[k / 2]
+        const vx = o.x - cx
+        const vy = o.y - cy
+        pts[k] = cx + vx * cos - vy * sin
+        pts[k + 1] = cy + vx * sin + vy * cos
+      }
+      const xs = pts.filter((_, k) => k % 2 === 0)
+      const ys = pts.filter((_, k) => k % 2 === 1)
+      if (xs.length) {
+        box.x = Math.min(...xs)
+        box.y = Math.min(...ys)
+        box.width = Math.max(...xs) - box.x
+        box.height = Math.max(...ys) - box.y
+      }
+    } else {
+      // 矩形：写 rotation（绕左上角 (x,y) 顺时针），反解 x,y 使中心保持在 (cx,cy) 不动
+      let deg = (g.startRotation ?? 0) + (delta * 180) / Math.PI
+      deg = ((deg % 360) + 360) % 360
+      box.rotation = deg
+      const t = (deg * Math.PI) / 180
+      const cos = Math.cos(t)
+      const sin = Math.sin(t)
+      box.x = cx - (g.ow / 2) * cos + (g.oh / 2) * sin
+      box.y = cy - (g.ow / 2) * sin - (g.oh / 2) * cos
+    }
+    return
   }
   if (g.mode === 'move') {
     box.x = g.ox + dx
@@ -1116,12 +1218,25 @@ function geomDragMove(e: MouseEvent) {
     box.width = Math.max(...xs) - box.x
     box.height = Math.max(...ys) - box.y
   } else if (g.orig.length === 4) {
-    // 轴对齐矩形：对锚角点不动，拖动当前角点缩放
-    const fixed = g.orig[(g.vi + 2) % 4]
-    box.x = Math.min(fixed.x, pt.x)
-    box.y = Math.min(fixed.y, pt.y)
-    box.width = Math.max(1, Math.abs(pt.x - fixed.x))
-    box.height = Math.max(1, Math.abs(pt.y - fixed.y))
+    // 矩形角点缩放：固定对角不动，沿自身宽/高单位向量（含 rotation）重算 x/y/width/height；
+    // rotation=0 时与轴对齐拖拽等价
+    const deg = Number(box.rotation) || 0
+    const t = (deg * Math.PI) / 180
+    const uW = { x: Math.cos(t), y: Math.sin(t) }
+    const uH = { x: -Math.sin(t), y: Math.cos(t) }
+    const A = g.orig[(g.vi + 2) % 4]
+    const d = { x: pt.x - A.x, y: pt.y - A.y }
+    const sw = g.vi === 1 || g.vi === 2 ? 1 : -1
+    const sh = g.vi === 2 || g.vi === 3 ? 1 : -1
+    const w = Math.max(1, sw * (d.x * uW.x + d.y * uW.y))
+    const h = Math.max(1, sh * (d.x * uH.x + d.y * uH.y))
+    // 锚角在 (aA,bA) 系数位：c0 = A - aA*w*uW - bA*h*uH
+    const aA = g.vi === 0 || g.vi === 3 ? 1 : 0
+    const bA = g.vi === 0 || g.vi === 1 ? 1 : 0
+    box.width = w
+    box.height = h
+    box.x = A.x - aA * w * uW.x - bA * h * uH.x
+    box.y = A.y - aA * w * uW.y - bA * h * uH.y
   }
 }
 
@@ -1446,14 +1561,34 @@ function polygonLabelPoint(box: CadBox): CadCorner {
   }
   return best ?? c
 }
-/** 名称标签锚点：多边形用内部点（见 polygonLabelPoint）；矩形用外接框左上角 */
-function boxLabelPos(box: CadBox): CadCorner {
-  if (isPolygonBox(box)) return polygonLabelPoint(box)
+/** 名称标签锚点：多边形用内部点（见 polygonLabelPoint）；矩形锚到真实左上角并沿自身宽/高方向内缩，
+ *  使标签随旋转一起落在斜放框内的左上角，不再跑到外接框外。u = unit(key) 用于随图缩放偏移。 */
+function boxLabelPos(box: CadBox, u = 1): CadCorner {
+  if (isPolygonBox(box)) {
+    const p = polygonLabelPoint(box)
+    return { x: p.x, y: p.y + 4 * u }
+  }
   const cs = cornersOf(box)
   if (!cs.length) return { x: 0, y: 0 }
+  if (cs.length !== 4) {
+    return { x: Math.min(...cs.map((c) => c.x)), y: Math.min(...cs.map((c) => c.y)) }
+  }
+  const o = cs[0]
+  let wx = cs[1].x - o.x
+  let wy = cs[1].y - o.y
+  let hx = cs[3].x - o.x
+  let hy = cs[3].y - o.y
+  const wl = Math.hypot(wx, wy) || 1
+  const hl = Math.hypot(hx, hy) || 1
+  wx /= wl
+  wy /= wl
+  hx /= hl
+  hy /= hl
+  const inset = 4 * u
+  const baseline = 14 * u
   return {
-    x: Math.min(...cs.map((c) => c.x)),
-    y: Math.min(...cs.map((c) => c.y)),
+    x: o.x + wx * inset + hx * baseline,
+    y: o.y + wy * inset + hy * baseline,
   }
 }
 function pointsAttr(box: CadBox): string {
@@ -1532,10 +1667,14 @@ function onStageMove(img: CadImage, e: MouseEvent) {
     hover.natX = Math.round(pt.x)
     hover.natY = Math.round(pt.y)
     hoverBox.value = dragging.value || geomDragging.value ? null : boxAtPoint(boxesForImage(img).map((b) => b.box), pt.x, pt.y)
+    const ab = activeBox.value
+    hoverRotate.value =
+      !dragging.value && !geomDragging.value && ab !== null && img.boxes.includes(ab) && rotateHandleHit(img, ab, pt)
   } else {
     hover.natX = 0
     hover.natY = 0
     hoverBox.value = null
+    hoverRotate.value = false
   }
   hover.show = true
 }
@@ -1543,6 +1682,7 @@ function onStageMove(img: CadImage, e: MouseEvent) {
 function onImgLeave() {
   hover.show = false
   hoverBox.value = null
+  hoverRotate.value = false
 }
 
 /**
@@ -1867,7 +2007,7 @@ watch(rawKey, load)
             class="draw-bar edit-bar"
           >
             <span class="draw-tip">
-              选中框：拖动框体平移，拖角点改大小；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
+              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转（按住 Shift 吸附 15°）；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
@@ -1939,8 +2079,8 @@ watch(rawKey, load)
                     <text
                       v-if="showNames"
                       class="box-name"
-                      :x="boxLabelPos(box).x + (isPolygonBox(box) ? 0 : 3 * unit(img.key))"
-                      :y="boxLabelPos(box).y + (isPolygonBox(box) ? 4 * unit(img.key) : 14 * unit(img.key))"
+                      :x="boxLabelPos(box, unit(img.key)).x"
+                      :y="boxLabelPos(box, unit(img.key)).y"
                       :text-anchor="isPolygonBox(box) ? 'middle' : 'start'"
                       :font-size="12 * unit(img.key)"
                       :stroke-width="3 * unit(img.key)"
@@ -1958,6 +2098,27 @@ watch(rawKey, load)
                         :fill="boxColor(bi)"
                         stroke="#fff"
                         :stroke-width="1.5"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <!-- 旋转手柄：顶/底边中点外侧，连接线指向图形；拖动绕中心旋转（Shift 吸附 15°） -->
+                      <line
+                        class="rotate-line"
+                        :x1="rotateHandlePos(img, box).ax"
+                        :y1="rotateHandlePos(img, box).ay"
+                        :x2="rotateHandlePos(img, box).hx"
+                        :y2="rotateHandlePos(img, box).hy"
+                        :stroke="boxColor(bi)"
+                        stroke-width="1.5"
+                        vector-effect="non-scaling-stroke"
+                      />
+                      <circle
+                        class="rotate-handle"
+                        :cx="rotateHandlePos(img, box).hx"
+                        :cy="rotateHandlePos(img, box).hy"
+                        :r="vertexRadius(img.key) * 2.4"
+                        fill="#fff"
+                        :stroke="boxColor(bi)"
+                        stroke-width="2"
                         vector-effect="non-scaling-stroke"
                       />
                     </template>
@@ -2313,6 +2474,14 @@ watch(rawKey, load)
   stroke-width: 2;
 }
 
+/* 旋转手柄：白底描边圆 + 细连接线，靠叠加层非命中区，由舞台层按自然坐标抓取 */
+.rotate-handle {
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.35));
+}
+.rotate-line {
+  opacity: 0.7;
+}
+
 /* 新增弹框：形状旁的说明 */
 .add-hint {
   margin-left: 10px;
@@ -2497,6 +2666,8 @@ watch(rawKey, load)
   width: 100%;
   height: 100%;
   pointer-events: none;
+  /* 让靠近上/下边缘的旋转手柄与连接线不被 viewBox 裁切 */
+  overflow: visible;
 }
 
 /* 框本体不参与命中：命中统一由舞台层按自然坐标算（矩形 fill=none 也能点中） */
