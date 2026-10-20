@@ -364,6 +364,8 @@ function boxColor(i: number): string {
 const showBoxes = ref(true)
 const fillPolygons = ref(true)
 const showVertices = ref(true)
+/** 是否在图上显示每个图形的名称标签 */
+const showNames = ref(true)
 
 /** 形状筛选：全部 / 仅矩形 / 仅多边形 */
 type ShapeFilter = 'all' | 'rect' | 'polygon'
@@ -1308,6 +1310,49 @@ function onStageClick(img: CadImage, e: MouseEvent) {
 function cornersOf(box: CadBox) {
   return boxCorners(box)
 }
+/** 射线法：点是否落在多边形内部 */
+function pointInPolygon(pt: CadCorner, vs: CadCorner[]): boolean {
+  let inside = false
+  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+    const { x: xi, y: yi } = vs[i]
+    const { x: xj, y: yj } = vs[j]
+    const hit = yi > pt.y !== yj > pt.y && pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi
+    if (hit) inside = !inside
+  }
+  return inside
+}
+/** 多边形名称锚点：优先面积形心；凹形（月牙/环带）形心落在图形外时，取顶点两两中点里
+ *  落在图形内且离形心最近的点，保证标签贴在图形上 */
+function polygonLabelPoint(box: CadBox): CadCorner {
+  const vs = cornersOf(box)
+  if (!vs.length) return { x: 0, y: 0 }
+  const c = boxCenter(box)
+  if (pointInPolygon(c, vs)) return c
+  let best: CadCorner | null = null
+  let bestD = Infinity
+  for (let i = 0; i < vs.length; i++) {
+    for (let j = i + 1; j < vs.length; j++) {
+      const m = { x: (vs[i].x + vs[j].x) / 2, y: (vs[i].y + vs[j].y) / 2 }
+      if (!pointInPolygon(m, vs)) continue
+      const d = (m.x - c.x) ** 2 + (m.y - c.y) ** 2
+      if (d < bestD) {
+        bestD = d
+        best = m
+      }
+    }
+  }
+  return best ?? c
+}
+/** 名称标签锚点：多边形用内部点（见 polygonLabelPoint）；矩形用外接框左上角 */
+function boxLabelPos(box: CadBox): CadCorner {
+  if (isPolygonBox(box)) return polygonLabelPoint(box)
+  const cs = cornersOf(box)
+  if (!cs.length) return { x: 0, y: 0 }
+  return {
+    x: Math.min(...cs.map((c) => c.x)),
+    y: Math.min(...cs.map((c) => c.y)),
+  }
+}
 function pointsAttr(box: CadBox): string {
   return cornersOf(box)
     .map((c) => `${c.x},${c.y}`)
@@ -1620,6 +1665,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
+        <el-checkbox v-model="showNames" size="small">显示名称</el-checkbox>
         <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中按 Delete 删除</span>
       </div>
 
@@ -1766,7 +1812,18 @@ watch(rawKey, load)
                       vector-effect="non-scaling-stroke"
                       stroke-linejoin="round"
                     />
-                    <!-- 选中框：顶点手柄（编辑模式下常显且可拖拽改大小） -->
+                    <!-- 名称标签：置于框内左上角，颜色随框，描边光晕保证深浅主题都清晰 -->
+                    <text
+                      v-if="showNames"
+                      class="box-name"
+                      :x="boxLabelPos(box).x + (isPolygonBox(box) ? 0 : 3 * unit(img.key))"
+                      :y="boxLabelPos(box).y + (isPolygonBox(box) ? 4 * unit(img.key) : 14 * unit(img.key))"
+                      :text-anchor="isPolygonBox(box) ? 'middle' : 'start'"
+                      :font-size="12 * unit(img.key)"
+                      :stroke-width="3 * unit(img.key)"
+                      :fill="boxColor(bi)"
+                    >{{ boxDisplayName(box, boxShapeLabel(box), bi + 1) }}</text>
+                    <!-- 选中框：顶点手柄（选中时常显，可拖拽改大小） -->
                     <template v-if="activeBox === box && showVertices">
                       <circle
                         v-for="(c, ci) in cornersOf(box)"
@@ -2322,6 +2379,16 @@ watch(rawKey, load)
 /* 框本体不参与命中：命中统一由舞台层按自然坐标算（矩形 fill=none 也能点中） */
 .box-shape {
   pointer-events: none;
+}
+
+/* 框名称标签：paint-order 描边光晕随主题配色，不拦截指针 */
+.box-name {
+  paint-order: stroke;
+  stroke: var(--c-bg-panel);
+  stroke-linejoin: round;
+  font-weight: 600;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* 选中框闪烁：仅限从右栏选中时（用户视线在列表），刚被选中时吸引注意，跑完 3 次即停 */
