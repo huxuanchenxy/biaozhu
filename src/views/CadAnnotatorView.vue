@@ -2416,10 +2416,10 @@ watch(rawKey, load)
   gap: 4px;
 }
 
-/* 多边形行用淡蓝底 + 虚线左边，与矩形区分（半透明蓝，深浅背景都能调色） */
+/* 多边形行：与矩形行完全一致（无底色、无左侧竖条） */
 .ann-item--poly {
-  background: rgba(64, 158, 255, 0.08);
-  border-left-color: rgba(64, 158, 255, 0.45);
+  background: transparent;
+  border-left-color: transparent;
 }
 
 .ann-line {
