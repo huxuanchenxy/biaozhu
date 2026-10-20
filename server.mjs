@@ -59,6 +59,26 @@ const BUCKET =
 // 后端服务地址（生产把 /api/... 反代到它，保存 json 用）：环境变量 > .env > 默认
 const API_TARGET =
   process.env.API_TARGET || fileEnv.API_TARGET || fileEnv.VITE_PROXY_TARGET || 'http://10.89.34.77:8080'
+// 界面主题（背景配色）：环境变量 > .env 文件（dist/.env.production）> 默认 light。
+// 不带 VITE_ 前缀故不编译进包，运行时注入 index.html；改完重启 node server.mjs 即切换，无需重新 build。
+const APP_THEME = (process.env.APP_THEME || fileEnv.APP_THEME || 'light').trim() === 'dark' ? 'dark' : 'light'
+
+/** 与 vite.config.ts 的 themeBootstrap 保持一致：首屏前给 <html> 打标并设定 color-scheme */
+function themeBootstrap(theme) {
+  const t = theme === 'dark' ? 'dark' : 'light'
+  return (
+    '<script>(function(){var t=' +
+    JSON.stringify(t) +
+    ';var d=document.documentElement;if(t===\'dark\')d.classList.add(\'dark\');d.setAttribute(\'data-theme\',t);'
+    +
+    'var m=document.querySelector(\'meta[name="color-scheme"]\');if(!m){m=document.createElement(\'meta\');'
+    +
+    'm.setAttribute(\'name\',\'color-scheme\');document.head.appendChild(m)}'
+    +
+    'm.content=t===\'dark\'?\'dark\':\'light only\';})();</' +
+    'script>'
+  )
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -346,6 +366,26 @@ function sendStatic(res, urlPath) {
     return
   }
   const ext = path.extname(filePath).toLowerCase()
+  // index.html：运行时把主题占位符替换为引导脚本（其余静态文件原样流式输出）
+  if (ext === '.html' && path.basename(filePath).toLowerCase() === 'index.html') {
+    let html
+    try {
+      html = readFileSync(filePath, 'utf8')
+    } catch {
+      res.writeHead(500).end('read index.html failed')
+      return
+    }
+    if (html.includes('<!--APP_THEME_BOOTSTRAP-->')) {
+      html = html.replace('<!--APP_THEME_BOOTSTRAP-->', themeBootstrap(APP_THEME))
+    } else if (/<\/head>/i.test(html)) {
+      // 兼容：若 build 过程删除了占位符注释，退而求其次插到 </head> 前（仍在首屏前执行）
+      html = html.replace(/<\/head>/i, themeBootstrap(APP_THEME) + '</head>')
+    }
+    const buf = Buffer.from(html, 'utf8')
+    res.writeHead(200, { 'Content-Type': MIME['.html'], 'Content-Length': buf.size })
+    res.end(buf)
+    return
+  }
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Content-Length': st.size,
@@ -387,6 +427,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`[server] 静态目录: ${DIST}`)
   console.log(`[server] 监听端口: ${PORT}`)
+  console.log(`[server] 界面主题 APP_THEME: ${APP_THEME}（改 dist/.env.production 后重启即切换，无需 build）`)
   console.log(`[server] 代理 /${BUCKET}/* -> ${MINIO_ENDPOINT}（服务端 SigV4 签名，时钟自动校正）`)
   console.log(`[server] 列目录 /cad-api/list?prefix=... -> ${MINIO_ENDPOINT}（ListObjectsV2）`)
   console.log(`[server] 代理 /api/* -> ${API_TARGET}（普通反代，保存 json）`)

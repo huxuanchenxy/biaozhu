@@ -1946,7 +1946,7 @@ watch(rawKey, load)
 
     <!-- 标注编辑弹框：类型单选、其余文本可编辑；多边形通常只有类型 -->
     <el-dialog v-model="editDialog" title="编辑标注" width="880px" top="8vh" append-to-body>
-      <el-form label-width="88px">
+      <el-form label-width="88px" class="ann-form">
         <el-form-item label="名称">
           <el-input :model-value="editBox?.name || ''" disabled />
         </el-form-item>
@@ -1972,7 +1972,7 @@ watch(rawKey, load)
 
     <!-- 新增标注弹框：几何已在图上绘制，此处选类型(+数值)并写回 -->
     <el-dialog v-model="addDialog" title="新增标注" width="880px" top="8vh" append-to-body>
-      <el-form label-width="88px">
+      <el-form label-width="88px" class="ann-form">
         <el-form-item label="形状">
           <el-tag :type="addIsPolygon ? 'warning' : 'primary'">{{ addIsPolygon ? '多边形' : '矩形' }}</el-tag>
         </el-form-item>
@@ -2014,8 +2014,8 @@ watch(rawKey, load)
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #fff;
-  border: 1px solid #ebeef5;
+  background: var(--c-bg-panel);
+  border: 1px solid var(--c-border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -2037,7 +2037,7 @@ watch(rawKey, load)
   flex: none;
   height: 48px;
   padding: 0 16px;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--c-border);
 }
 
 .pane-title {
@@ -2047,7 +2047,7 @@ watch(rawKey, load)
 
 .hint {
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 
 /* 右栏头部：标题+计数居左，新增按钮居右 */
@@ -2059,15 +2059,15 @@ watch(rawKey, load)
   min-width: 0;
 }
 
-/* 卡片头的“新增”按钮组：用标签 + 虚线框把矩形/多边形绑定成一个新增入口 */
+/* 卡片头的“新增”按钮组：用标签 + 虚线框把矩形/多边形绑定成一个新增入口（半透明蓝，深浅背景都适应） */
 .add-group {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 2px 6px 2px 9px;
-  border: 1px dashed #a0cfff;
+  border: 1px dashed rgba(64, 158, 255, 0.5);
   border-radius: 999px;
-  background: #f0f7ff;
+  background: rgba(64, 158, 255, 0.1);
 }
 /* el-button 相邻默认自带 12px margin-left，与 gap 叠加会过大，归零后仅由 gap 控制间距 */
 .add-group .el-button + .el-button {
@@ -2075,8 +2075,8 @@ watch(rawKey, load)
 }
 /* 卡片头的“编辑”按钮组：与新增同款胶囊，橙色系区分职责 */
 .edit-group {
-  border-color: #f3cfa0;
-  background: #fdf6ec;
+  border-color: rgba(230, 162, 60, 0.55);
+  background: rgba(230, 162, 60, 0.14);
 }
 .edit-group .add-group-label {
   color: #e6a23c;
@@ -2088,14 +2088,14 @@ watch(rawKey, load)
   white-space: nowrap;
 }
 
-/* 卡片内绘制提示条 */
+/* 卡片内绘制提示条（半透明蓝，深浅背景都适应） */
 .draw-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: #ecf5ff;
-  border-bottom: 1px solid #d9ecff;
+  background: rgba(64, 158, 255, 0.12);
+  border-bottom: 1px solid rgba(64, 158, 255, 0.28);
   font-size: 12px;
 }
 .draw-tip {
@@ -2106,11 +2106,11 @@ watch(rawKey, load)
 
 /* 几何编辑提示条：与绘制条同构，橙色系呼应编辑按钮组 */
 .edit-bar {
-  background: #fdf6ec;
-  border-bottom-color: #faecd8;
+  background: rgba(230, 162, 60, 0.14);
+  border-bottom-color: rgba(230, 162, 60, 0.32);
 }
 .edit-bar .draw-tip {
-  color: #b88230;
+  color: #e6a23c;
 }
 
 /* 编辑模式下可拖拽的顶点手柄（叠加层整体 pointer-events:none，仅作视觉提示） */
@@ -2123,7 +2123,7 @@ watch(rawKey, load)
 .add-hint {
   margin-left: 10px;
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 
 /* 多边形绘制：光标处待定顶点的黄色光晕 */
@@ -2144,8 +2144,8 @@ watch(rawKey, load)
   flex: none;
   padding: 8px 16px;
   font-size: 13px;
-  color: #606266;
-  border-bottom: 1px solid #f0f0f0;
+  color: var(--c-text-regular);
+  border-bottom: 1px solid var(--c-divider);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2159,14 +2159,14 @@ watch(rawKey, load)
   flex-wrap: wrap;
   gap: 12px;
   padding: 8px 16px;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fafbfc;
+  border-bottom: 1px solid var(--c-divider);
+  background: var(--c-bg-toolbar);
 }
 
 .toolbar-hint {
   margin-left: auto;
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 
 /* 工具条左侧的公共路径前缀（/images/ 之前那段） */
@@ -2177,7 +2177,7 @@ watch(rawKey, load)
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 
 .pane-body {
@@ -2217,7 +2217,7 @@ watch(rawKey, load)
   /* 多图列于 flex 纵向容器时保持自身高度不被压缩（靠 overflow 滚动）；单图模式由 .img-list--single 覆盖为 flex:1 */
   flex: 0 0 auto;
   margin-bottom: 16px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--c-border);
   border-radius: 4px;
   cursor: pointer;
 }
@@ -2234,14 +2234,14 @@ watch(rawKey, load)
   flex-wrap: wrap;
   gap: 12px;
   padding: 8px 12px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--c-divider);
 }
 
 .img-path {
   flex: 1;
   min-width: 0;
   font-size: 13px;
-  color: #303133;
+  color: var(--c-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2250,7 +2250,7 @@ watch(rawKey, load)
 .img-meta {
   flex: none;
   font-size: 12px;
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 
 /* 单图模式入口：多图下直接点击图片路径→新标签打开仅含当前图片的独立标注页 */
@@ -2270,7 +2270,7 @@ watch(rawKey, load)
 
 .img-card-body {
   padding: 12px;
-  background: #e8eaed;
+  background: var(--c-bg-stage);
 }
 
 /* 视口：缩放/平移在此框内裁剪，固定高度使“拖动”有意义；背景置灰与白底图纸区分 */
@@ -2279,7 +2279,7 @@ watch(rawKey, load)
   overflow: hidden;
   height: 62vh;
   min-height: 320px;
-  background: #e8eaed;
+  background: var(--c-bg-stage);
 }
 
 /* 包裹 img 与叠加层，受 translate+scale 变换；以左上角为缩放/平移基准 */
@@ -2397,7 +2397,7 @@ watch(rawKey, load)
   font-size: 13px;
   cursor: pointer;
   border-left: 3px solid transparent;
-  border-bottom: 1px solid #eef0f3;
+  border-bottom: 1px solid var(--c-border);
 }
 
 /* 左侧主区：名称行 + 属性行，宽度自适应，属性多时在此列内换行，不会钻到右侧按钮下方 */
@@ -2409,10 +2409,10 @@ watch(rawKey, load)
   gap: 4px;
 }
 
-/* 多边形行用淡蓝底 + 虚线左边，与矩形区分 */
+/* 多边形行用淡蓝底 + 虚线左边，与矩形区分（半透明蓝，深浅背景都能调色） */
 .ann-item--poly {
-  background: #f6fbff;
-  border-left-color: #bfdbfe;
+  background: rgba(64, 158, 255, 0.08);
+  border-left-color: rgba(64, 158, 255, 0.45);
 }
 
 .ann-line {
@@ -2428,11 +2428,11 @@ watch(rawKey, load)
 }
 
 .ann-item:hover {
-  background: #f5f7fa;
+  background: var(--c-bg-hover);
 }
 
 .ann-item--active {
-  background: #ecf5ff;
+  background: var(--c-bg-active);
   /* 选中行加一圈粗边框更突出；用 outline 不改变盒模型、无布局抖动 */
   outline: 2px solid #409eff;
   outline-offset: -2px;
@@ -2446,11 +2446,11 @@ watch(rawKey, load)
 @keyframes ann-flash {
   0%,
   100% {
-    background: #ecf5ff;
+    background: var(--c-bg-active);
     box-shadow: none;
   }
   50% {
-    background: #d9ecff;
+    background: rgba(64, 158, 255, 0.22);
     box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.4);
   }
 }
@@ -2462,10 +2462,10 @@ watch(rawKey, load)
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
-  color: #606266;
-  background: #f5f7fa;
-  border-top: 1px solid #ebeef5;
-  border-bottom: 1px solid #ebeef5;
+  color: var(--c-text-regular);
+  background: var(--c-bg-sub);
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2473,7 +2473,7 @@ watch(rawKey, load)
 
 .ann-no {
   width: 20px;
-  color: #909399;
+  color: var(--c-text-secondary);
   text-align: right;
 }
 
@@ -2486,9 +2486,9 @@ watch(rawKey, load)
   padding: 1px 8px;
   font-size: 12px;
   font-weight: 600;
-  color: #337ecc;
-  background: #eef4fd;
-  border: 1px solid #cfe3f8;
+  color: #409eff;
+  background: rgba(64, 158, 255, 0.12);
+  border: 1px solid rgba(64, 158, 255, 0.35);
   border-radius: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2501,8 +2501,8 @@ watch(rawKey, load)
   gap: 6px;
   min-width: 88px;
   padding: 2px 8px;
-  background: #f5f7fa;
-  border: 1px solid #ebeef5;
+  background: var(--c-bg-sub);
+  border: 1px solid var(--c-border);
   border-radius: 4px;
 }
 
@@ -2517,8 +2517,8 @@ watch(rawKey, load)
   padding: 0 6px;
   font-size: 12px;
   line-height: 18px;
-  color: #909399;
-  border: 1px solid #dcdfe6;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-border-strong);
   border-radius: 3px;
 }
 
@@ -2529,7 +2529,7 @@ watch(rawKey, load)
 }
 
 .ann-field {
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 
 /* 键（字段名）统一蓝色，值统一深灰 */
@@ -2538,11 +2538,11 @@ watch(rawKey, load)
 }
 
 .ann-sep {
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 
 .ann-val {
-  color: #303133;
+  color: var(--c-text);
 }
 
 .ann-value {
@@ -2568,11 +2568,38 @@ watch(rawKey, load)
   width: 100%;
 }
 
+/* 标注弹框表单：校验提示参与布局 + 拉开行间隔，保证红色提醒不被遮挡（名称/类型/属性行均适用） */
+.ann-form :deep(.el-form-item) {
+  margin-bottom: 22px;
+}
+.ann-form :deep(.el-form-item__content) {
+  flex-wrap: wrap;
+}
+.ann-form :deep(.el-form-item__error) {
+  position: static;
+  width: 100%;
+  padding-top: 2px;
+}
+
 /* 数值等属性字段两列排布 */
 .attr-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 16px;
+  /* 行间隔：拉开上下两行，避免红色校验提示被下一行输入框遮挡 */
+  row-gap: 20px;
+}
+/* 校验提示改为参与布局（不再绝对定位压在下一行上）：红字换行到输入框下方，行高自动撑开，永远可见 */
+.attr-grid :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+.attr-grid :deep(.el-form-item__content) {
+  flex-wrap: wrap;
+}
+.attr-grid :deep(.el-form-item__error) {
+  position: static;
+  width: 100%;
+  padding-top: 2px;
 }
 
 .type-radios :deep(.el-radio-group) {
@@ -2597,12 +2624,12 @@ watch(rawKey, load)
 .edit-empty {
   padding: 4px 0 0 88px;
   font-size: 13px;
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 
 .empty {
   padding: 24px;
   text-align: center;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 </style>

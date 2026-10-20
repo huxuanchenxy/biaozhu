@@ -1,5 +1,12 @@
 /// <reference types="vite/client" />
 
+/**
+ * 界面主题（背景配色）APP_THEME：light | dark。
+ * 刻意不带 VITE_ 前缀，因此【不编译进前端包、不暴露给前端代码】；
+ * 由服务在运行时注入 index.html（dev 走 Vite 插件、prod 走 server.mjs），
+ * 改完 .env / .env.[mode] 里的 APP_THEME 后只需重启即可切换，无需 build。
+ */
+
 /** 自定义环境变量类型提示（新增变量时同步补这里，写代码会有提示） */
 interface ImportMetaEnv {
   /** 当前环境标识：development / production */

@@ -21,13 +21,40 @@ function copyRuntimeFiles(outDir: string) {
   }
 }
 
+/**
+ * 生成主题引导内联脚本：在首屏渲染前给 <html> 打标（dark 类 + data-theme）并设定 color-scheme，避免闪烁。
+ * 与 server.mjs 中的实现保持一致：dev 由本文件 transformIndexHtml 注入，prod 由 server.mjs 注入。
+ * light 保留原有 'light only'（阻止系统深色把内置 PDF 查看器外壳渲染成黑），dark 用 'dark'。
+ */
+function themeBootstrap(theme: string) {
+  const t = theme === 'dark' ? 'dark' : 'light'
+  return `<script>(function(){var t=${JSON.stringify(t)};var d=document.documentElement;if(t==='dark')d.classList.add('dark');d.setAttribute('data-theme',t);var m=document.querySelector('meta[name="color-scheme"]');if(!m){m=document.createElement('meta');m.setAttribute('name','color-scheme');document.head.appendChild(m)}m.content=t==='dark'?'dark':'light only';})();</script>`
+}
+
+/**
+ * 开发期主题注入：把 index.html 里的 <!--APP_THEME_BOOTSTRAP--> 占位符替换为引导脚本。
+ * 仅 apply:'serve'（不作用于 build），让 dist/index.html 保留占位符，交由 server.mjs 运行时注入，
+ * 从而实现「改 APP_THEME + 重启即切换，无需 build」。
+ */
+function injectTheme(theme: string) {
+  return {
+    name: 'inject-app-theme',
+    apply: 'serve' as const,
+    transformIndexHtml(html: string) {
+      return html.replace('<!--APP_THEME_BOOTSTRAP-->', themeBootstrap(theme))
+    },
+  }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   // 读取当前模式下的环境变量（.env / .env.[mode]）
   const env = loadEnv(mode, process.cwd(), 'VITE_')
+  // 主题变量 APP_THEME 不带 VITE_ 前缀（不进前端包），这里用空前缀再读一次拿到它
+  const appTheme = loadEnv(mode, process.cwd(), '').APP_THEME || 'light'
 
   return {
-    plugins: [vue(), copyRuntimeFiles(env.VITE_OUT_DIR || 'dist')],
+    plugins: [injectTheme(appTheme), vue(), copyRuntimeFiles(env.VITE_OUT_DIR || 'dist')],
 
     // mupdf 用了 top-level await 且含被条件保护的 node:fs 动态导入，排除出预构建，
     // 交由 Vite 直接服务/打包（wasm 经 new URL(..., import.meta.url) 作为资源产出）。

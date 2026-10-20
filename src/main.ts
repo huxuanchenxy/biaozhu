@@ -2,6 +2,8 @@ import { createApp } from 'vue'
 
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// Element Plus 深色变量：仅在 <html class="dark"> 时生效（由运行时主题引导脚本打标），浅色主题下无影响
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 

@@ -51,8 +51,8 @@ const hideNav = computed(() => route.meta.hideNav === true)
   align-items: center;
   height: var(--app-header-height);
   padding: 0 24px;
-  background-color: #fff;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  background-color: var(--c-bg-header);
+  box-shadow: 0 1px 4px var(--c-shadow);
 }
 
 .logo {

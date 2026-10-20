@@ -291,7 +291,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: #e9eaee;
+  background: var(--c-bg-stage);
 }
 
 /* scoped 中无法引用 JS 常量，这里与 SIDE_PAD / PAGE_GAP 保持一致（10px / 12px） */
@@ -331,7 +331,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   height: 100%;
   font-size: 13px;
-  color: #606266;
+  color: var(--c-text-regular);
 }
 
 .pdf-state--error {

@@ -54,7 +54,7 @@ onBeforeUnmount(() => window.clearTimeout(failTimer))
   position: relative;
   flex: 1;
   min-height: 0;
-  background: #e9eaee;
+  background: var(--c-bg-stage);
 }
 
 .pdf-native-frame {
@@ -71,7 +71,7 @@ onBeforeUnmount(() => window.clearTimeout(failTimer))
   height: 100%;
   padding: 16px;
   font-size: 13px;
-  color: #606266;
+  color: var(--c-text-regular);
   text-align: center;
 }
 

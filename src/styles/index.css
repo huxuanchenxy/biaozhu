@@ -1,7 +1,51 @@
 :root {
   --app-header-height: 60px;
-  /* 全局只支持浅色：让浏览器 UA 控件（含内置 PDF 查看器外壳）不跟随系统深色模式 */
+
+  /* ---------- 浅色主题（默认）：界面「背景」配色变量 ---------- */
+  /* 仅描述应用外壳（页面/面板/卡片/边框/文字）配色；文档内容区（PDF 页、图纸图片）保持原色不受主题影响 */
+  --c-bg: #f5f7fa; /* 页面底色 */
+  --c-bg-header: #ffffff; /* 顶栏 */
+  --c-bg-panel: #ffffff; /* 面板 / 卡片 */
+  --c-bg-sub: #f5f7fa; /* 次级块（答案槽、属性 chip、分组头、引用块） */
+  --c-bg-sub2: #f0f2f5; /* 次级块稍深（列表滚动区底） */
+  --c-bg-hover: #f5f7fa; /* 行 hover */
+  --c-bg-active: #ecf5ff; /* 选中行 */
+  --c-bg-toolbar: #fafbfc; /* 工具条 */
+  --c-bg-stage: #e8eaed; /* 图片/PDF 视口外围底色（非文档本身） */
+  --c-border: #ebeef5; /* 主边框 */
+  --c-border-strong: #dcdfe6; /* 强调边框 */
+  --c-divider: #f0f0f0; /* 分隔线 */
+  --c-text: #303133; /* 主文字 */
+  --c-text-regular: #606266; /* 常规文字 */
+  --c-text-secondary: #909399; /* 次要文字 */
+  --c-text-muted: #a8abb2; /* 占位/提示 */
+  --c-shadow: rgba(0, 21, 41, 0.08); /* 顶栏阴影 */
+
+  /* 浅色：让浏览器 UA 控件（含内置 PDF 查看器外壳）不跟随系统深色模式 */
   color-scheme: light only;
+}
+
+/* ---------- 深色主题：仅覆盖上面这组变量，组件样式全部走 var() 自动切换 ---------- */
+html.dark {
+  --c-bg: #141414;
+  --c-bg-header: #1d1e1f;
+  --c-bg-panel: #1d1e1f;
+  --c-bg-sub: #262627;
+  --c-bg-sub2: #1a1a1b;
+  --c-bg-hover: #262627;
+  --c-bg-active: #1b2e42;
+  --c-bg-toolbar: #1d1e1f;
+  --c-bg-stage: #0b0b0b;
+  --c-border: #363637;
+  --c-border-strong: #4c4d4f;
+  --c-divider: #363637;
+  --c-text: #e5eaf3;
+  --c-text-regular: #cfd3dc;
+  --c-text-secondary: #a3a6ad;
+  --c-text-muted: #8d9299;
+  --c-shadow: rgba(0, 0, 0, 0.5);
+
+  color-scheme: dark;
 }
 
 * {
@@ -20,8 +64,8 @@ body {
   font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', Arial, sans-serif;
   font-size: 14px;
-  color: #303133;
-  background-color: #f5f7fa;
+  color: var(--c-text);
+  background-color: var(--c-bg);
 }
 
 a {

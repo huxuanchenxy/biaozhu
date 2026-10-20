@@ -289,9 +289,8 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  /* 纯白背景：MuPDF 渲染的页面图本身也是白底，四周留白同样是白 */
-  background: #fff;
-  color-scheme: light only;
+  /* 视口外围随主题变色（深色时为深），MuPDF 渲染的页面本体仍为白底 */
+  background: var(--c-bg-stage);
 }
 
 .pdf-pages {
@@ -325,7 +324,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   height: 100%;
   font-size: 13px;
-  color: #606266;
+  color: var(--c-text-regular);
 }
 
 .pdf-state--error {

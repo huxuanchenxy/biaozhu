@@ -715,8 +715,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #fff;
-  border: 1px solid #ebeef5;
+  background: var(--c-bg-panel);
+  border: 1px solid var(--c-border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -736,7 +736,7 @@ onBeforeUnmount(() => {
   flex: none;
   height: 48px;
   padding: 0 16px;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--c-border);
 }
 
 .pane-title {
@@ -746,7 +746,7 @@ onBeforeUnmount(() => {
 
 .hint {
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 
 .pane-body {
@@ -767,7 +767,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--c-bg-panel);
 }
 
 .pdf-host--split {
@@ -789,11 +789,11 @@ onBeforeUnmount(() => {
   font-family: Consolas, Monaco, 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.7;
-  color: #303133;
+  color: var(--c-text);
   /* 文档里有超长行，pre-wrap 换行避免横向滚动条 */
   white-space: pre-wrap;
   word-break: break-word;
-  background: #fff;
+  background: var(--c-bg-panel);
 }
 
 /* 翻译视图右栏：渲染 cn_ 译文，占右半，与左侧 PDF 之间加分隔线 */
@@ -802,7 +802,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #ebeef5;
+  border-left: 1px solid var(--c-border);
 }
 
 /* MarkdownPreview 根节点撑满右栏并可滚动（min-height:0 才能在 flex 列里正确出滚动条） */
@@ -839,7 +839,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   padding: 12px 16px;
   overflow: auto;
-  background: #f0f2f5;
+  background: var(--c-bg-sub2);
 }
 
 .qa-list {
@@ -850,8 +850,8 @@ onBeforeUnmount(() => {
 
 .qa-card {
   overflow: hidden;
-  background: #fff;
-  border: 1px solid #ebeef5;
+  background: var(--c-bg-panel);
+  border: 1px solid var(--c-border);
   border-radius: 6px;
 }
 
@@ -859,17 +859,17 @@ onBeforeUnmount(() => {
   padding: 8px 12px;
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
-  background: #f5f7fa;
-  border-bottom: 1px solid #ebeef5;
+  color: var(--c-text);
+  background: var(--c-bg-sub);
+  border-bottom: 1px solid var(--c-border);
 }
 
 /* 问槽位：白底带边框盒子 */
 .qa-question {
   margin: 10px 12px 0;
   padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--c-bg-panel);
+  border: 1px solid var(--c-border-strong);
   border-radius: 4px;
 }
 
@@ -877,15 +877,15 @@ onBeforeUnmount(() => {
 .qa-answer {
   margin: 10px 12px 12px;
   padding: 10px 12px;
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
+  background: var(--c-bg-sub);
+  border: 1px solid var(--c-border-strong);
   border-radius: 4px;
 }
 
 .qa-text {
   font-size: 13px;
   line-height: 1.7;
-  color: #303133;
+  color: var(--c-text);
   /* 问答内容自带换行，保留原始排版 */
   white-space: pre-wrap;
   word-break: break-word;
@@ -901,7 +901,7 @@ onBeforeUnmount(() => {
 .empty {
   padding: 10px 0;
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--c-text-muted);
 }
 
 .qa-footer {
@@ -909,7 +909,7 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   flex: none;
   padding: 8px 16px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--c-border);
 }
 /* ---------- 选段翻译 ---------- */
 .sel-translate-btn {
@@ -931,7 +931,7 @@ onBeforeUnmount(() => {
 .trans-label {
   margin: 4px 0 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 .trans-src {
   max-height: 140px;
@@ -942,13 +942,13 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  background: #f5f7fa;
+  background: var(--c-bg-sub);
   border-radius: 4px;
 }
 .trans-loading {
   padding: 12px 0;
   font-size: 13px;
-  color: #909399;
+  color: var(--c-text-secondary);
 }
 .trans-error {
   display: flex;
@@ -961,7 +961,7 @@ onBeforeUnmount(() => {
 .trans-out {
   max-height: 50vh;
   overflow: auto;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--c-border);
   border-radius: 4px;
 }
 </style>
