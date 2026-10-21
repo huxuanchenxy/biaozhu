@@ -1703,6 +1703,23 @@ function coordLabelStyle() {
   return { left: `${hover.left}px`, top: `${hover.top}px`, transform: `translate(${tx}, ${ty})` }
 }
 
+/** 悬停标注的信息浮层数据：直接复用右栏行（含名称/配色/归属图/属性字段），按对象引用命中 */
+const hoverInfo = computed(() => {
+  const box = hoverBox.value
+  if (!box) return null
+  return allRows.value.find((r) => r.box === box) ?? null
+})
+
+/** 信息浮层定位：默认在光标右下；靠近右/下边缘时翻到左/上，避免被视口 overflow 裁切 */
+function boxTipStyle() {
+  const rows = hoverInfo.value?.fields.length ?? 0
+  const estW = 200
+  const estH = 34 + rows * 20
+  const tx = hover.left + estW + 18 > hover.sw ? -(estW + 12) : 14
+  const ty = hover.top + estH + 18 > hover.sh ? -(estH + 12) : 20
+  return { left: `${hover.left}px`, top: `${hover.top}px`, transform: `translate(${tx}px, ${ty}px)` }
+}
+
 function selectImage(i: number) {
   selectedIndex.value = i
   activeBox.value = null
@@ -2217,6 +2234,31 @@ watch(rawKey, load)
               >
                 X: {{ hover.natX }}, Y: {{ hover.natY }}
               </div>
+              <!-- 悬停标注的信息浮层：显示名称/归属图/类型属性等（拖拽、绘制、弹框打开时不显示） -->
+              <div
+                v-if="
+                  hoverInfo &&
+                  hover.key === img.key &&
+                  hover.show &&
+                  !dragging &&
+                  !geomDragging &&
+                  !drawMode[img.key] &&
+                  !editDialog &&
+                  !addDialog
+                "
+                class="box-tip"
+                :style="boxTipStyle()"
+              >
+                <div class="box-tip-title">
+                  <span class="box-tip-dot" :style="{ background: hoverInfo.color }"></span>
+                  <span>{{ hoverInfo.name }}</span>
+                </div>
+                <div v-for="f in hoverInfo.fields" :key="f.label" class="box-tip-row">
+                  <span class="box-tip-k">{{ f.label }}</span>
+                  <span class="box-tip-v">{{ f.value }}</span>
+                </div>
+                <div v-if="!hoverInfo.fields.length" class="box-tip-empty">无属性</div>
+              </div>
             </div>
           </div>
         </article>
@@ -2719,6 +2761,59 @@ watch(rawKey, load)
   white-space: nowrap;
   pointer-events: none;
   text-shadow: 0 0 2px #fff, 0 0 2px #fff;
+}
+
+/* 悬停标注的信息浮层：主题感知背景/边框，不拦截鼠标事件 */
+.box-tip {
+  position: absolute;
+  z-index: 3;
+  min-width: 140px;
+  max-width: 240px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--c-text-regular);
+  background: var(--c-bg-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+.box-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+.box-tip-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.box-tip-sub {
+  margin: 2px 0 6px;
+  font-size: 11px;
+  color: var(--c-text-muted);
+}
+.box-tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.box-tip-k {
+  flex: none;
+  color: var(--c-text-secondary);
+}
+.box-tip-v {
+  color: var(--c-text-regular);
+  text-align: right;
+  word-break: break-all;
+}
+.box-tip-empty {
+  font-style: italic;
+  color: var(--c-text-muted);
 }
 
 /* 十字辅助线：铺满整个视口，虚线，不拦截鼠标 */
