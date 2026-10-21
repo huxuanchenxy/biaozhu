@@ -493,6 +493,14 @@ const activeBox = ref<CadBox | null>(null)
 const hoverBox = ref<CadBox | null>(null)
 /** 光标是否正悬停在选中框的旋转手柄上（用于切换光标提示可旋转） */
 const hoverRotate = ref(false)
+/** 隐藏标注时清掉选中/悬停态，避免图上已不可见的框残留编辑提示条与高亮 */
+watch(showBoxes, (v) => {
+  if (!v) {
+    activeBox.value = null
+    hoverBox.value = null
+    hoverRotate.value = false
+  }
+})
 /** 本次选中的来源：闪烁只提示用户视线不在的那一侧（点图闪列表行，点列表闪图上的框） */
 const flashSource = ref<'list' | 'img' | ''>('')
 function activateRow(row: (typeof allRows.value)[number]) {
@@ -1945,7 +1953,8 @@ watch(rawKey, load)
         <el-checkbox v-model="showBoxes" size="small">标注叠加</el-checkbox>
         <el-checkbox v-model="fillPolygons" size="small">多边形填充</el-checkbox>
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
-        <el-checkbox v-model="showNames" size="small">显示名称</el-checkbox>
+        <el-checkbox v-model="showBoxes" size="small">显示标注</el-checkbox>
+        <el-checkbox v-model="showNames" size="small" :disabled="!showBoxes">显示名称</el-checkbox>
         <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中后 Ctrl+C/Ctrl+V 复制粘贴、Delete 删除</span>
       </div>
 
@@ -2024,7 +2033,7 @@ watch(rawKey, load)
             class="draw-bar edit-bar"
           >
             <span class="draw-tip">
-              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转（按住 Shift 吸附 15°）；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
+              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
