@@ -63,19 +63,17 @@ const API_TARGET =
 // 不带 VITE_ 前缀故不编译进包，运行时注入 index.html；改完重启 node server.mjs 即切换，无需重新 build。
 const APP_THEME = (process.env.APP_THEME || fileEnv.APP_THEME || 'light').trim() === 'dark' ? 'dark' : 'light'
 
-/** 与 vite.config.ts 的 themeBootstrap 保持一致：首屏前给 <html> 打标并设定 color-scheme */
+/** 与 vite.config.ts 的 themeBootstrap 保持一致：首屏前给 <html> 打标并设定 color-scheme；localStorage 选择优先于 APP_THEME 默认 */
 function themeBootstrap(theme) {
   const t = theme === 'dark' ? 'dark' : 'light'
   return (
-    '<script>(function(){var t=' +
+    '<script>(function(){var K=\'app-theme\',cfg=' +
     JSON.stringify(t) +
-    ';var d=document.documentElement;if(t===\'dark\')d.classList.add(\'dark\');d.setAttribute(\'data-theme\',t);'
-    +
-    'var m=document.querySelector(\'meta[name="color-scheme"]\');if(!m){m=document.createElement(\'meta\');'
-    +
-    'm.setAttribute(\'name\',\'color-scheme\');document.head.appendChild(m)}'
-    +
-    'm.content=t===\'dark\'?\'dark\':\'light only\';})();</' +
+    ';var t;try{t=localStorage.getItem(K)}catch(e){}if(t!==\'dark\'&&t!==\'light\')t=cfg;' +
+    'var d=document.documentElement;d.classList.toggle(\'dark\',t===\'dark\');d.setAttribute(\'data-theme\',t);' +
+    'var m=document.querySelector(\'meta[name="color-scheme"]\');if(!m){m=document.createElement(\'meta\');' +
+    'm.setAttribute(\'name\',\'color-scheme\');document.head.appendChild(m)}' +
+    'm.setAttribute(\'content\',t===\'dark\'?\'dark\':\'light only\');})();</' +
     'script>'
   )
 }

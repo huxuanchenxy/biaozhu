@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { currentTheme, toggleTheme, type ThemeMode } from '@/utils/theme'
 
 const appTitle = import.meta.env.VITE_APP_TITLE
 
@@ -13,6 +14,12 @@ const route = useRoute()
 
 /** 标注页只保留抬头（logo），不显示导航 tab，内容区也撑满整屏 */
 const hideNav = computed(() => route.meta.hideNav === true)
+
+/** 当前主题（初始值由首屏引导脚本写在 <html> 上，这里读取保持一致） */
+const theme = ref<ThemeMode>(currentTheme())
+function switchTheme() {
+  theme.value = toggleTheme()
+}
 </script>
 
 <template>
@@ -33,6 +40,12 @@ const hideNav = computed(() => route.meta.hideNav === true)
         </el-menu-item>
       </el-menu>
       <div v-else class="layout-menu layout-menu--empty"></div>
+
+      <el-tooltip :content="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" placement="bottom">
+        <el-button class="theme-toggle" circle @click="switchTheme">
+          <el-icon><component :is="theme === 'dark' ? 'Sunny' : 'Moon'" /></el-icon>
+        </el-button>
+      </el-tooltip>
     </el-header>
 
     <el-main :class="['layout-main', { 'layout-main--flush': hideNav }]">
@@ -65,6 +78,11 @@ const hideNav = computed(() => route.meta.hideNav === true)
   flex: 1;
   margin-left: 32px;
   border-bottom: none;
+}
+
+.theme-toggle {
+  flex: none;
+  margin-left: 16px;
 }
 
 .layout-main {

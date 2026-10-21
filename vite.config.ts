@@ -24,11 +24,12 @@ function copyRuntimeFiles(outDir: string) {
 /**
  * 生成主题引导内联脚本：在首屏渲染前给 <html> 打标（dark 类 + data-theme）并设定 color-scheme，避免闪烁。
  * 与 server.mjs 中的实现保持一致：dev 由本文件 transformIndexHtml 注入，prod 由 server.mjs 注入。
+ * 优先级：localStorage['app-theme']（用户在页面上切换并保存）> 传入的 theme（APP_THEME 配置默认）。
  * light 保留原有 'light only'（阻止系统深色把内置 PDF 查看器外壳渲染成黑），dark 用 'dark'。
  */
 function themeBootstrap(theme: string) {
   const t = theme === 'dark' ? 'dark' : 'light'
-  return `<script>(function(){var t=${JSON.stringify(t)};var d=document.documentElement;if(t==='dark')d.classList.add('dark');d.setAttribute('data-theme',t);var m=document.querySelector('meta[name="color-scheme"]');if(!m){m=document.createElement('meta');m.setAttribute('name','color-scheme');document.head.appendChild(m)}m.content=t==='dark'?'dark':'light only';})();</script>`
+  return `<script>(function(){var K='app-theme',cfg=${JSON.stringify(t)};var t;try{t=localStorage.getItem(K)}catch(e){}if(t!=='dark'&&t!=='light')t=cfg;var d=document.documentElement;d.classList.toggle('dark',t==='dark');d.setAttribute('data-theme',t);var m=document.querySelector('meta[name="color-scheme"]');if(!m){m=document.createElement('meta');m.setAttribute('name','color-scheme');document.head.appendChild(m)}m.setAttribute('content',t==='dark'?'dark':'light only');})();</script>`
 }
 
 /**
