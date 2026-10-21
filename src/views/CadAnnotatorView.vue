@@ -727,6 +727,10 @@ async function deleteBox(row: AnnRow) {
   }
   if (activeBox.value === row.box) activeBox.value = null
   if (hoverBox.value === row.box) hoverBox.value = null
+  // 被删标注若正是剪贴板复制的那个：一并清空剪贴板，避免 Ctrl+V 把已删标注“复活”（按引用或 uuid 匹配）
+  if (clipboard && (clipboard.source === row.box || (!!row.box.uuid && clipboard.source.uuid === row.box.uuid))) {
+    clipboard = null
+  }
   await persist('已删除标注')
 }
 
@@ -1432,8 +1436,8 @@ async function submitAdd() {
 }
 
 /* ---- 复制 / 粘贴（Ctrl+C / Ctrl+V）---- */
-/** 剪贴板：存被复制框的深拷贝、归属图片下标，count 让连续粘贴逐次错开不重叠 */
-let clipboard: { box: CadBox; imageIndex: number; count: number } | null = null
+/** 剪贴板：存被复制框的深拷贝、来源引用（供删除时联动清理）、归属图片下标，count 让连续粘贴逐次错开不重叠 */
+let clipboard: { box: CadBox; source: CadBox; imageIndex: number; count: number } | null = null
 
 /** 深拷贝一个框（toRaw + JSON，剥离响应式代理，避免与原框共享引用） */
 function cloneBox(b: CadBox): CadBox {
@@ -1446,8 +1450,7 @@ function copyActiveBox() {
   if (!box) return
   const imageIndex = images.value.findIndex((im) => im.boxes.includes(box))
   if (imageIndex < 0) return
-  clipboard = { box: cloneBox(box), imageIndex, count: 0 }
-  ElMessage.success(`已复制「${box.name || boxShapeLabel(box)}」`)
+  clipboard = { box: cloneBox(box), source: box, imageIndex, count: 0 }
 }
 
 /** 粘贴：复制剪贴板框，赋新 uuid、重命名、按次数错位，加入源数组与该图并写回 */
@@ -1488,7 +1491,6 @@ async function pasteClipboard() {
   scrollToRow(box)
   // 粘贴不直接写盘：登记到待保存清单，与几何改动共用同一条「保存/放弃」入口
   pendingPasteBoxes.value.push(box)
-  ElMessage.success(`已粘贴「${box.name}」，改动待保存`)
 }
 
 /**
@@ -1860,11 +1862,29 @@ async function load() {
   }
 }
 
+/**
+ * 是否有模态弹框打开：优先看已知的编辑/新增 el-dialog ref（即时，不受渲染时序影响），
+ * 再通用探测页面上任何可见的 Element Plus 模态层（.el-overlay 涵盖对话框/抽屉/确认框，.el-image-viewer__wrapper 为图片预览）。
+ * 这样任何现有/新增的弹窗（含 ElMessageBox 命令式确认框）打开期间，标注视图的全局快捷键（Ctrl+C/V、Delete、Esc 等）均失效。
+ * 注：.el-overlay 为 position:fixed，offsetParent 恒为 null，故用计算样式的 display 判断可见性（关闭时 v-show 置 display:none 或节点已移除）。
+ */
+function isModalOpen(): boolean {
+  if (editDialog.value || addDialog.value) return true
+  const nodes = document.querySelectorAll<HTMLElement>(
+    '.el-overlay, .el-message-box, .el-image-viewer__wrapper',
+  )
+  for (const el of nodes) {
+    if (getComputedStyle(el).display !== 'none') return true
+  }
+  return false
+}
+
 /** 键盘全局：Esc 取消退出绘制；Delete 对选中框弹出删除确认 */
 function onWindowKeyDown(e: KeyboardEvent) {
+  // 任何模态弹框（编辑/新增/删除确认等）打开时，不响应标注视图快捷键
+  if (isModalOpen()) return
   // Esc：绘制中（矩形/多边形）取消退出；弹框打开时交给弹框自身处理
   if (e.key === 'Escape') {
-    if (editDialog.value || addDialog.value) return
     // 有未保存的改动（几何/粘贴）：Esc 放弃并回滚（弹确认）
     if (hasPendingChanges.value) {
       discardGeom()
@@ -1878,10 +1898,9 @@ function onWindowKeyDown(e: KeyboardEvent) {
     }
     return
   }
-  // Ctrl/Cmd + C / V：复制 / 粘贴当前选中标注（弹框打开或焦点在输入框时不拦截，交给浏览器原生）
+  // Ctrl/Cmd + C / V：复制 / 粘贴当前选中标注（焦点在输入框时不拦截，交给浏览器原生）
   const mod = e.ctrlKey || e.metaKey
   if (mod && (e.key === 'c' || e.key === 'C')) {
-    if (editDialog.value || addDialog.value) return
     const tc = e.target as HTMLElement | null
     if (tc && (tc.tagName === 'INPUT' || tc.tagName === 'TEXTAREA' || tc.isContentEditable)) return
     if (!activeBox.value) return
@@ -1890,7 +1909,6 @@ function onWindowKeyDown(e: KeyboardEvent) {
     return
   }
   if (mod && (e.key === 'v' || e.key === 'V')) {
-    if (editDialog.value || addDialog.value) return
     const tv = e.target as HTMLElement | null
     if (tv && (tv.tagName === 'INPUT' || tv.tagName === 'TEXTAREA' || tv.isContentEditable)) return
     if (!clipboard) return
@@ -1899,8 +1917,7 @@ function onWindowKeyDown(e: KeyboardEvent) {
     return
   }
   if (e.key !== 'Delete') return
-  // 弹框打开中、或焦点在输入控件里时不拦截
-  if (editDialog.value || addDialog.value) return
+  // 焦点在输入控件里时不拦截
   const t = e.target as HTMLElement | null
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
   const box = activeBox.value
