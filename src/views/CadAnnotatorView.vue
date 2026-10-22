@@ -298,7 +298,8 @@ function onWindowMouseUp() {
         kind: 'geom',
         steps: [
           {
-            box: toRaw(g.box),
+            // 存响应式代理引用（与拖动时同一个 proxy），还原时经它写回才能触发重渲染；仅查 raw-key 快照时才 toRaw
+            box: g.box,
             before: g.beforeGeom,
             after: boxGeomSnap(toRaw(g.box)),
             baseline: geomSnapshot?.get(toRaw(g.box)),
@@ -1109,7 +1110,7 @@ function applyGeomSteps(steps: GeomStep[]) {
   if (dirty && !geomSnapshot && ann.value) {
     // 回退到「进入编辑前的原始态」：没有基线可比，就地取当前态为新基线
     geomSnapshot = snapshotGeometry()
-    for (const st of steps) st.baseline = geomSnapshot.get(st.box) ?? st.baseline
+    for (const st of steps) st.baseline = geomSnapshot.get(toRaw(st.box)) ?? st.baseline
   }
   editDirty.value = dirty
   geomDirtyKey.value = dirty ? key : ''
