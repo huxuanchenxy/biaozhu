@@ -229,13 +229,14 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
     return
   }
   if (drawMode[img.key] === 'polygon') return // 多边形顶点在 click 里累加
-  // 选中即拖：弹框打开时挂起；否则按在当前选中框的手柄→缩放、框体→平移该框；
-  // 未选中任何框、或按在选中框之外（含未选中的框、空白处）→落到下面的整图平移，不影响拖动/缩放
+  // 直接拖拽：弹框打开时挂起。已选中框的旋转/顶点手柄优先（改形状）；
+  // 否则按在任意框体（含未选中的）上即选中并整体平移，重叠时取面积最小者——无需先点选再拖；
+  // 只有按在空白处才落到下面的整图平移，不影响滚轮缩放
   if (!editDialog.value && !addDialog.value) {
-    const ab = activeBox.value
-    if (ab && img.boxes.includes(ab)) {
-      const pt = naturalPoint(img, e)
-      if (pt) {
+    const pt = naturalPoint(img, e)
+    if (pt) {
+      const ab = activeBox.value
+      if (ab && img.boxes.includes(ab)) {
         if (rotateHandleHit(img, ab, pt)) {
           startRotateDrag(ab, img, e, pt)
           return
@@ -245,10 +246,15 @@ function onStageMouseDown(img: CadImage, e: MouseEvent) {
           startVertexDrag(ab, img, vi, e, pt)
           return
         }
-        if (boxAtPoint([ab], pt.x, pt.y) === ab) {
-          startShapeDrag(ab, img, e, pt)
-          return
-        }
+      }
+      const hb = boxAtPoint(
+        boxesForImage(img).map((b) => b.box),
+        pt.x,
+        pt.y,
+      )
+      if (hb) {
+        startShapeDrag(hb, img, e, pt)
+        return
       }
     }
   }
@@ -1161,7 +1167,6 @@ function runHistory(dir: 'undo' | 'redo') {
   if (!entry) return
   applyHistoryEntry(entry, dir)
   to.push(entry)
-  ElMessage.info(dir === 'undo' ? '已撤销上一步' : '已重做')
 }
 
 /** 某张图是否有待保存改动（几何拖动或粘贴新增），据此把保存/放弃条与提示锁定到对应图 */
@@ -2183,7 +2188,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
         <el-checkbox v-model="showBoxes" size="small">显示标注</el-checkbox>
         <el-checkbox v-model="showNames" size="small" :disabled="!showBoxes">显示名称</el-checkbox>
-        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中后 Ctrl+C/Ctrl+V 复制粘贴、Delete 删除 ・ Ctrl+Z 撤销 / Ctrl+Y 重做未保存改动</span>
+        <span class="toolbar-hint">拖框移动 ・ 拖角点/手柄改形 ・ 空白平移 ・ 滚轮缩放 ・ 双击复位 ・ Ctrl+C/V 复制粘贴 ・ Del 删除 ・ Ctrl+Z/Y 撤销重做</span>
       </div>
 
       <div
@@ -2256,12 +2261,9 @@ watch(rawKey, load)
               </el-button>
             </span>
           </div>
-          <div
-            v-if="(activeBox && img.boxes.includes(activeBox)) || hasPendingOn(img)"
-            class="draw-bar edit-bar"
-          >
+          <div v-if="hasPendingOn(img)" class="draw-bar edit-bar">
             <span class="draw-tip">
-              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Ctrl+Z 逐步撤销、Ctrl+Y 重做，Esc/「放弃」整体回滚
+              本图有未保存改动 ・ 点「保存修改」写回，Esc 或「放弃」回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
