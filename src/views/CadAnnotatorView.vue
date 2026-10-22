@@ -281,10 +281,25 @@ function onWindowMouseMove(e: MouseEvent) {
 }
 function onWindowMouseUp() {
   if (geomDrag) {
+    const g = geomDrag
     geomDrag = null
     geomDragging.value = false
     // 只点选未实际移动：丢弃惰性快照，避免留下空的"待保存"状态
     if (!editDirty.value) geomSnapshot = null
+    else if (g.moved && g.beforeGeom) {
+      // 一次完整手势记一步撤销（基线取自「放弃」回滚快照，撤销后据此判断是否仍脏）
+      pushHistory({
+        kind: 'geom',
+        steps: [
+          {
+            box: toRaw(g.box),
+            before: g.beforeGeom,
+            after: boxGeomSnap(toRaw(g.box)),
+            baseline: geomSnapshot?.get(toRaw(g.box)),
+          },
+        ],
+      })
+    }
     return
   }
   if (rectDrawing) {
@@ -706,6 +721,7 @@ async function deleteBox(row: AnnRow) {
   if (hasPendingGeom) {
     revertPendingChanges()
     clearGeomEdit()
+    clearHistory()
   }
   const src = ann.value
   if (!src) return
@@ -731,6 +747,8 @@ async function deleteBox(row: AnnRow) {
   if (clipboard && (clipboard.source === row.box || (!!row.box.uuid && clipboard.source.uuid === row.box.uuid))) {
     clipboard = null
   }
+  // 删除直接写盘：旧历史基于盘前结构，继续撤销会把已删标注复活，整体作废
+  clearHistory()
   await persist('已删除标注')
 }
 
@@ -986,6 +1004,166 @@ function clearGeomEdit() {
   geomDragging.value = false
 }
 
+/* ------------------------------------------------------------------
+ * 撤销 / 重做（Ctrl+Z / Ctrl+Y·Ctrl+Shift+Z）：以「步」为粒度记录未保存的改动——
+ *  一次几何手势（拖动/缩放/旋转）或一次粘贴各算一步，逐步回退/重做；
+ *  「保存」写盘或「放弃」整体回滚后步与磁盘/回滚基线脱节，历史随之作废清空；
+ *  绘制新增与属性编辑/删除均为确认即落盘的操作，不进入历史。
+ * ------------------------------------------------------------------ */
+interface GeomStep {
+  /** 本次手势涉及的框（按引用就地改几何，不依赖 uuid） */
+  box: CadBox
+  before: GeomSnap
+  after: GeomSnap
+  /** 「放弃」回滚基线（全局快照里该框的几何）；缺失表示无基线 */
+  baseline?: GeomSnap
+}
+interface HistoryEntry {
+  kind: 'geom' | 'paste'
+  /** kind==='geom'：本次手势涉及框的前后几何（撤销用 before，重做用 after） */
+  steps?: GeomStep[]
+  /** kind==='paste'：粘贴新增的框本体（按引用移出/移回）与归属图片 key */
+  box?: CadBox
+  imageKey?: string
+}
+const undoStack: HistoryEntry[] = []
+const redoStack: HistoryEntry[] = []
+/** 历史步数上限，防长会话堆积 */
+const HISTORY_LIMIT = 100
+
+function pushHistory(entry: HistoryEntry) {
+  undoStack.push(entry)
+  if (undoStack.length > HISTORY_LIMIT) undoStack.shift()
+  redoStack.length = 0
+}
+
+/** 作废全部历史：加载/换文档、整体保存或放弃、删除等落盘操作后调用 */
+function clearHistory() {
+  undoStack.length = 0
+  redoStack.length = 0
+}
+
+const canUndo = computed(() => undoStack.length > 0 && !geomDragging.value)
+const canRedo = computed(() => redoStack.length > 0 && !geomDragging.value)
+
+/** 记录单个框的几何快照（与全局快照同字段，按引用恢复时就地写回） */
+function boxGeomSnap(b: CadBox): GeomSnap {
+  return {
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    rotation: b.rotation,
+    points: b.points ? [...b.points] : undefined,
+  }
+}
+
+/** 把几何快照就地写回框（不换引用，img.boxes 与源数组共享同一对象） */
+function applyGeomSnap(b: CadBox, s: GeomSnap) {
+  b.x = s.x
+  b.y = s.y
+  b.width = s.width
+  b.height = s.height
+  b.rotation = s.rotation
+  if (s.points && b.points) b.points.splice(0, b.points.length, ...s.points)
+  else b.points = s.points ? [...s.points] : undefined
+}
+
+/** 几何是否与快照等价（粘贴框不影响几何，几何等价即视为未脏） */
+function geomSnapEqual(a: GeomSnap, b: GeomSnap): boolean {
+  for (const k of ['x', 'y', 'width', 'height', 'rotation'] as const) {
+    const av = a[k]
+    const bv = b[k]
+    if ((av == null || av === undefined) && (bv == null || bv === undefined)) continue
+    if (Number(av) !== Number(bv)) return false
+  }
+  const pa = a.points ?? []
+  const pb = b.points ?? []
+  if (pa.length !== pb.length) return false
+  for (let i = 0; i < pa.length; i++) if (pa[i] !== pb[i]) return false
+  return true
+}
+
+/** 找框归属的图片 key（img.boxes 持同一引用），未归属返回 '' */
+function imageKeyOfBox(box: CadBox): string {
+  for (const im of images.value) if (im.boxes.includes(box)) return im.key
+  return ''
+}
+
+/** 应用一组几何步，并把 geomDirtyKey 记在首个被改动的框所属的图片上 */
+function applyGeomSteps(steps: GeomStep[]) {
+  let dirty = false
+  let key = ''
+  for (const st of steps) {
+    applyGeomSnap(st.box, st.after)
+    // 无基线可比时按脏处理（保守，避免漏报待保存）
+    dirty = dirty || !st.baseline || !geomSnapEqual(st.after, st.baseline)
+    if (!key) key = imageKeyOfBox(st.box)
+  }
+  if (dirty && !geomSnapshot && ann.value) {
+    // 回退到「进入编辑前的原始态」：没有基线可比，就地取当前态为新基线
+    geomSnapshot = snapshotGeometry()
+    for (const st of steps) st.baseline = geomSnapshot.get(st.box) ?? st.baseline
+  }
+  editDirty.value = dirty
+  geomDirtyKey.value = dirty ? key : ''
+}
+
+function applyHistoryEntry(entry: HistoryEntry, dir: 'undo' | 'redo') {
+  if (entry.kind === 'geom') {
+    applyGeomSteps(entry.steps!.map((s) => ({ ...s, after: dir === 'undo' ? s.before : s.after })))
+    return
+  }
+  const box = entry.box!
+  if (dir === 'undo') {
+    const src = ann.value
+    for (const arr of [src?.splitedAnnotation?.content, src?.splitedAnnotationPolygon?.content]) {
+      if (!arr) continue
+      const i = arr.indexOf(box)
+      if (i >= 0) arr.splice(i, 1)
+    }
+    for (const im of images.value) {
+      const i = im.boxes.indexOf(box)
+      if (i >= 0) im.boxes.splice(i, 1)
+    }
+    const pi = pendingPasteBoxes.value.indexOf(box)
+    if (pi >= 0) pendingPasteBoxes.value.splice(pi, 1)
+    if (activeBox.value === box) activeBox.value = null
+    if (hoverBox.value === box) hoverBox.value = null
+    return
+  }
+  const src = ann.value
+  if (!src) return
+  // 快照/脏标记机制照常登记，「放弃」才能把它一并移除
+  if (!geomSnapshot) ensureGeomSnapshot()
+  const img = images.value.find((im) => im.key === entry.imageKey)
+  if (img) img.boxes.push(box)
+  if (isPolygonBox(box)) {
+    if (!src.splitedAnnotationPolygon) src.splitedAnnotationPolygon = { content: [] }
+    if (!src.splitedAnnotationPolygon.content) src.splitedAnnotationPolygon.content = []
+    if (!src.splitedAnnotationPolygon.content.includes(box)) src.splitedAnnotationPolygon.content.push(box)
+  } else {
+    if (!src.splitedAnnotation) src.splitedAnnotation = { content: [] }
+    if (!src.splitedAnnotation.content) src.splitedAnnotation.content = []
+    if (!src.splitedAnnotation.content.includes(box)) src.splitedAnnotation.content.push(box)
+  }
+  if (!pendingPasteBoxes.value.includes(box)) pendingPasteBoxes.value.push(box)
+  activeBox.value = box
+  // 粘贴不改几何：几何脏标记维持原样，仅保证 dirty 键锁定到被粘贴的图
+  if (editDirty.value && !geomDirtyKey.value) geomDirtyKey.value = entry.imageKey || ''
+}
+
+function runHistory(dir: 'undo' | 'redo') {
+  if (geomDragging.value) return
+  const from = dir === 'undo' ? undoStack : redoStack
+  const to = dir === 'undo' ? redoStack : undoStack
+  const entry = from.pop()
+  if (!entry) return
+  applyHistoryEntry(entry, dir)
+  to.push(entry)
+  ElMessage.info(dir === 'undo' ? '已撤销上一步' : '已重做')
+}
+
 /** 某张图是否有待保存改动（几何拖动或粘贴新增），据此把保存/放弃条与提示锁定到对应图 */
 function hasPendingOn(img: CadImage): boolean {
   return (
@@ -998,10 +1176,15 @@ function hasPendingOn(img: CadImage): boolean {
 async function saveGeom() {
   if (!hasPendingChanges.value) {
     clearGeomEdit()
+    clearHistory()
     return
   }
   const ok = await persist('已保存修改')
-  if (ok) clearGeomEdit()
+  if (ok) {
+    clearGeomEdit()
+    // 落盘后历史步与磁盘态脱节，撤销/重做作废
+    clearHistory()
+  }
 }
 
 /** 放弃：有未保存改动时二次确认，确认后还原几何并移除粘贴新增 */
@@ -1019,6 +1202,7 @@ async function discardGeom() {
   }
   revertPendingChanges()
   clearGeomEdit()
+  clearHistory()
 }
 
 /* ---- 拖动/缩放交互 ---- */
@@ -1036,6 +1220,8 @@ let geomDrag: {
   oh: number
   orig: GeomCorners
   moved: boolean
+  /** 撤销历史：手势按下前该框的几何快照（松手且有位移时与前态配对入栈） */
+  beforeGeom?: GeomSnap
   /** 旋转：拖拽起始时的图形中点（旋转基准，拖拽期间固定） */
   cx?: number
   cy?: number
@@ -1076,6 +1262,7 @@ function startShapeDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorner
     oh: Number(box.height) || 0,
     orig: cornersOf(box).map((c) => ({ ...c })),
     moved: false,
+    beforeGeom: boxGeomSnap(toRaw(box)),
   }
   geomDragging.value = true
 }
@@ -1099,6 +1286,7 @@ function startVertexDrag(box: CadBox, img: CadImage, vi: number, e: MouseEvent, 
     oh: Number(box.height) || 0,
     orig: cornersOf(box).map((c) => ({ ...c })),
     moved: false,
+    beforeGeom: boxGeomSnap(toRaw(box)),
   }
   geomDragging.value = true
 }
@@ -1146,6 +1334,7 @@ function startRotateDrag(box: CadBox, img: CadImage, e: MouseEvent, pt: CadCorne
     oh: Number(box.height) || 0,
     orig: cornersOf(box).map((cc) => ({ ...cc })),
     moved: false,
+    beforeGeom: boxGeomSnap(toRaw(box)),
     cx: c.x,
     cy: c.y,
     startAngle: Math.atan2(pt.y - c.y, pt.x - c.x),
@@ -1491,6 +1680,8 @@ async function pasteClipboard() {
   scrollToRow(box)
   // 粘贴不直接写盘：登记到待保存清单，与几何改动共用同一条「保存/放弃」入口
   pendingPasteBoxes.value.push(box)
+  // 一次粘贴记一步撤销（按对象引用移出/移回，归属图按 key 记录防列表变动）
+  pushHistory({ kind: 'paste', box: toRaw(box), imageKey: img.key })
 }
 
 /**
@@ -1771,6 +1962,8 @@ async function load() {
   geomDrag = null
   geomDragging.value = false
   hover.show = false
+  // 换文档：撤销/重做历史随旧数据作废
+  clearHistory()
   const path = cadPath.value
   if (!path) {
     loadError.value =
@@ -1879,7 +2072,7 @@ function isModalOpen(): boolean {
   return false
 }
 
-/** 键盘全局：Esc 取消退出绘制；Delete 对选中框弹出删除确认 */
+/** 键盘全局：Esc 取消退出绘制；Delete 对选中框弹出删除确认；Ctrl+Z/Y 撤销/重做未保存改动 */
 function onWindowKeyDown(e: KeyboardEvent) {
   // 任何模态弹框（编辑/新增/删除确认等）打开时，不响应标注视图快捷键
   if (isModalOpen()) return
@@ -1914,6 +2107,24 @@ function onWindowKeyDown(e: KeyboardEvent) {
     if (!clipboard) return
     e.preventDefault()
     pasteClipboard()
+    return
+  }
+  // Ctrl/Cmd + Z：撤销上一步未保存改动（一次手势/一次粘贴为一步）；焦点在输入框时不拦截，交给原生撤销
+  if (mod && (e.key === 'z' || e.key === 'Z')) {
+    const tz = e.target as HTMLElement | null
+    if (tz && (tz.tagName === 'INPUT' || tz.tagName === 'TEXTAREA' || tz.isContentEditable)) return
+    if (!canUndo.value) return
+    e.preventDefault()
+    runHistory('undo')
+    return
+  }
+  // Ctrl/Cmd + Y 或 Ctrl/Cmd + Shift + Z（Mac 惯例）：重做
+  if ((mod && (e.key === 'y' || e.key === 'Y')) || (mod && e.shiftKey && (e.key === 'z' || e.key === 'Z'))) {
+    const ty = e.target as HTMLElement | null
+    if (ty && (ty.tagName === 'INPUT' || ty.tagName === 'TEXTAREA' || ty.isContentEditable)) return
+    if (!canRedo.value) return
+    e.preventDefault()
+    runHistory('redo')
     return
   }
   if (e.key !== 'Delete') return
@@ -1972,7 +2183,7 @@ watch(rawKey, load)
         <el-checkbox v-model="showVertices" size="small">顶点手柄</el-checkbox> -->
         <el-checkbox v-model="showBoxes" size="small">显示标注</el-checkbox>
         <el-checkbox v-model="showNames" size="small" :disabled="!showBoxes">显示名称</el-checkbox>
-        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中后 Ctrl+C/Ctrl+V 复制粘贴、Delete 删除</span>
+        <span class="toolbar-hint">双击还原图片大小 ・ 单击选中框后可直接拖动/拖角点改大小 ・ 空白处拖动平移整图 ・ 滚轮缩放 ・ 可新增矩形或多边形 ・ 选中后 Ctrl+C/Ctrl+V 复制粘贴、Delete 删除 ・ Ctrl+Z 撤销 / Ctrl+Y 重做未保存改动</span>
       </div>
 
       <div
@@ -2050,7 +2261,7 @@ watch(rawKey, load)
             class="draw-bar edit-bar"
           >
             <span class="draw-tip">
-              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Esc/「放弃」回滚
+              选中框：拖动框体平移，拖角点改大小，拖顶部圆形手柄旋转；空白处/未选中框拖动平移整图，滚轮缩放。改动/粘贴后点「保存修改」写回，Ctrl+Z 逐步撤销、Ctrl+Y 重做，Esc/「放弃」整体回滚
             </span>
           </div>
           <div v-if="drawMode[img.key]" class="draw-bar">
