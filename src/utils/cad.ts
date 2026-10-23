@@ -555,7 +555,7 @@ const ATTR_VALIDATOR_CHECKS: Record<Exclude<CadAttrValidator, 'text'>, { msg: st
   number: { msg: '必须是数字（可带 φ/⌀/R/SR 等前缀、负号与小数），如 30、φ30、R12、-0.5、12.75', test: (s) => /^[Φφ⌀RS]*-?\d+(\.\d+)?$/.test(s.replace(/\s+/g, '')) },
   integer: { msg: '应为编号，可带字母前缀或区间，如 12、W3、1-3', test: (s) => /^[A-Za-z]?\d+([-~]\d+)?$/.test(s.replace(/\s+/g, '')) },
   deviation: { msg: '应为数值公差，可带符号、± 或 φ，如 +0.05、-0.02、±0.1、±φ0.05', test: (s) => /^[±]?[+-]?[Φφ⌀]?\d+(\.\d+)?$/.test(s.replace(/\s+/g, '')) },
-  angle: { msg: '应为角度值（可含 ° ′ ″），如 45、30.5、45°、1°30′', test: (s) => /\d/.test(s) && /^-?[\d.,°′″'" ]+$/.test(s) },
+  angle: { msg: '应为角度值（可含 ± / + / - 与 ° ′ ″），如 45、30.5、45°、+2.5°、-1°、1°30′', test: (s) => /\d/.test(s) && /^[±]?[+-]?[\d.,°′″'" ]+$/.test(s) },
   gdt: { msg: '应为公差带宽度数值，可带 φ、C/S 前缀与 M/L/C 修饰，如 0.2、φ0.1、Sφ0.2、φ0.2M', test: (s) => /^[SC]?[Φφ⌀]?\d+(\.\d+)?([MLC]|\([MLC]\))?$/.test(s.replace(/\s+/g, '')) },
   thread: {
     msg: '应为螺纹代号，如 M12x1.75-6H、G1/2、NPT3/4、Tr40x7',
