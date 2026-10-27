@@ -398,6 +398,9 @@ const showNames = ref(true)
 type ShapeFilter = 'all' | 'rect' | 'polygon'
 const shapeFilter = ref<ShapeFilter>('all')
 
+/** 右栏标注信息搜索关键词：不区分大小写匹配名称 / 所属图片 / 属性键值 */
+const searchKeyword = ref('')
+
 /**
  * 右栏：平铺显示全部标注（跨图片）。
  * 每行记录归属图片的下标与框在该图内的序号，配色/命名与左栏叠加层保持一致；
@@ -464,12 +467,19 @@ const visibleRows = computed(() => {
   // 组内先按图片顺序（images 保持 list 接口返回的原始顺序），同图内再按名称序号；并按组内位置重新编号 no
   const byImgThenSeq = (a: (typeof allRows.value)[number], b: (typeof allRows.value)[number]) =>
     a.imageIndex - b.imageIndex || bySeq(a, b)
+  // 搜索过滤：命中名称、所属图片名或任一属性键/值即保留（忽略大小写与首尾空格）
+  const kw = searchKeyword.value.trim().toLowerCase()
+  const matchKw = (r: (typeof allRows.value)[number]) =>
+    !kw ||
+    [r.name, r.imageName, ...r.fields.flatMap((f) => [f.label, f.value])].some((t) =>
+      String(t ?? '').toLowerCase().includes(kw),
+    )
   const rectRows = allRows.value
-    .filter((r) => !r.isPolygon)
+    .filter((r) => !r.isPolygon && matchKw(r))
     .sort(byImgThenSeq)
     .map((r, i) => ({ ...r, no: i + 1 }))
   const polyRows = allRows.value
-    .filter((r) => r.isPolygon)
+    .filter((r) => r.isPolygon && matchKw(r))
     .sort(byImgThenSeq)
     .map((r, i) => ({ ...r, no: i + 1 }))
   if (shapeFilter.value === 'rect') return rectRows
@@ -2512,18 +2522,30 @@ watch(rawKey, load)
           <span class="pane-title">标注信息</span>
           <span class="hint"> {{ allRows.length }} 项</span>
         </div>
+        <el-input
+          v-model="searchKeyword"
+          class="ann-search"
+          size="small"
+          placeholder="搜索名称 / 图片 / 属性"
+          clearable
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
       </header>
 
       <div class="pane-body ann-list">
         <div v-if="!loading && !allRows.length" class="empty">暂无标注</div>
-        <el-alert
-          v-else-if="unassignedCount"
-          class="ann-warn"
-          :title="`${unassignedCount} 个标注未能按 displayKey 匹配到切图，已暂挂在第一张图`"
-          type="warning"
-          show-icon
-          :closable="false"
-        />
+        <template v-else>
+          <el-alert
+            v-if="unassignedCount"
+            class="ann-warn"
+            :title="`${unassignedCount} 个标注未能按 displayKey 匹配到切图，已暂挂在第一张图`"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <div v-if="!visibleRows.length" class="empty">无匹配结果</div>
+        </template>
 
         <ul v-if="visibleRows.length" class="ann-ul">
           <template v-for="(row, idx) in visibleRows" :key="`${row.imageIndex}-${row.index}`">
@@ -2694,6 +2716,12 @@ watch(rawKey, load)
   gap: 8px;
   flex: 1;
   min-width: 0;
+}
+
+/* 右栏头部的搜索框：小尺寸、限宽，与标题行共处一行 */
+.ann-search {
+  width: 150px;
+  flex: none;
 }
 
 /* 卡片头的“新增”按钮组：用标签 + 虚线框把矩形/多边形绑定成一个新增入口（半透明蓝，深浅背景都适应） */
