@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "dev:network": "node scripts/dev.mjs --network",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "fetch:model": "node scripts/download-model.mjs"

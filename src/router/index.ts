@@ -9,7 +9,15 @@ import {
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/home',
+    // 根目录不再是可浏览的首页：统一跳转 401 未授权页（配合下方守卫）
+    redirect: '/401',
+  },
+  {
+    path: '/401',
+    name: 'Unauthorized',
+    component: () => import('@/views/UnauthorizedView.vue'),
+    /** hideNav: 401 作为独立提示页，不显示平台导航 */
+    meta: { title: '401 未授权', hideNav: true },
   },
   {
     path: '/home',
@@ -74,6 +82,23 @@ const router = createRouter({
     : createWebHistory(import.meta.env.BASE_URL),
   routes,
   scrollBehavior: () => ({ top: 0 }),
+})
+
+/**
+ * 访问控制守卫：本平台仅允许通过具体的标注任务链接进入。
+ * 只放行带 object key 的深链（/cad/<key>、/markdown/<key>）；
+ * 其余「前台入口」（/、/home、/about、裸 /cad、裸 /markdown、乱路径等）一律跳 401 未授权。
+ * 注：hash 路由下服务端无法区分深链与根目录（都是 GET /），故只能在路由层拦截。
+ */
+router.beforeEach((to) => {
+  // 401 页自身放行，避免死循环
+  if (to.name === 'Unauthorized') return true
+  // :key(.*) 可能为空串（裸 /cad、/markdown），此时视为未授权
+  const raw = to.params.key
+  const key = Array.isArray(raw) ? raw.join('/') : raw ?? ''
+  const hasKey = key.trim() !== ''
+  const isDoc = (to.name === 'CadAnnotator' || to.name === 'MarkdownAnnotatorDoc') && hasKey
+  return isDoc ? true : { name: 'Unauthorized' }
 })
 
 /** 切换页面时更新浏览器标签标题 */

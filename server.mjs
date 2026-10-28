@@ -47,6 +47,8 @@ const fileEnv = {
 
 // 监听端口：环境变量 PORT > .env 文件 SERVER_PORT > 默认 3344
 const PORT = Number(process.env.PORT || fileEnv.SERVER_PORT || 3344)
+// 监听地址：环境变量 HOST > .env 文件 SERVER_HOST > 默认 0.0.0.0（生产全接口）；开发由 scripts/dev.mjs 按 --network 参数传入收窄
+const HOST = process.env.HOST || fileEnv.SERVER_HOST || '0.0.0.0'
 // MinIO 配置：环境变量 > .env 文件（MINIO_* 优先，兼容旧的 VITE_MINIO_*）> 硬编码默认
 const MINIO_ENDPOINT =
   process.env.MINIO_ENDPOINT || fileEnv.MINIO_ENDPOINT || fileEnv.VITE_MINIO_ENDPOINT || 'http://10.89.14.234:12001'
@@ -422,9 +424,9 @@ const server = http.createServer((req, res) => {
   }
 })
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`[server] 静态目录: ${DIST}`)
-  console.log(`[server] 监听端口: ${PORT}`)
+  console.log(`[server] 监听端口: ${PORT}（绑定 ${HOST}）`)
   console.log(`[server] 界面主题 APP_THEME: ${APP_THEME}（改 dist/.env.production 后重启即切换，无需 build）`)
   console.log(`[server] 代理 /${BUCKET}/* -> ${MINIO_ENDPOINT}（服务端 SigV4 签名，时钟自动校正）`)
   console.log(`[server] 列目录 /cad-api/list?prefix=... -> ${MINIO_ENDPOINT}（ListObjectsV2）`)

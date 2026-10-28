@@ -5,6 +5,11 @@
  * Vite 把 /<bucket>/... 代理到 server.mjs（见 vite.config.ts 的 VITE_MINIO_SIGNER），
  * 由 server.mjs 用服务端时钟完成 SigV4 后转发 MinIO，因此开发也必须跑 server.mjs。
  * 本脚本让 `npm run dev` 一条命令同时起两者，任一退出则全部退出。
+ *
+ * 访问范围由启动参数控制（安全要求默认仅本机）：
+ *   npm run dev                 只允许 localhost / 127.0.0.1 访问
+ *   npm run dev -- --network    同时允许局域网 IP 访问（host 绑 0.0.0.0）
+ *   npm run dev:network         等价于上一条
  */
 import { spawn } from 'node:child_process'
 import path from 'node:path'
@@ -13,14 +18,19 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SIGNER_PORT = process.env.SIGNER_PORT || '3345'
 
+// 是否开放网络访问：argv 里带 --network / -n 即绑 0.0.0.0（localhost 与 IP 都可访问），否则只绑 127.0.0.1
+const bindHost = process.argv.slice(2).some((a) => a === '--network' || a === '-n') ? '0.0.0.0' : '127.0.0.1'
+console.log(`[dev] 绑定地址: ${bindHost}（${bindHost === '0.0.0.0' ? 'localhost 与局域网 IP 均可访问' : '仅 localhost 可访问，如需 IP 访问请加参数 --network'}）`)
+
 const signer = spawn(process.execPath, [path.join(root, 'server.mjs')], {
-  env: { ...process.env, PORT: SIGNER_PORT },
+  env: { ...process.env, PORT: SIGNER_PORT, HOST: bindHost },
   stdio: 'inherit',
   cwd: root,
 })
 const vite = spawn(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js')], {
   stdio: 'inherit',
   cwd: root,
+  env: { ...process.env, DEV_HOST: bindHost },
 })
 
 let closing = false

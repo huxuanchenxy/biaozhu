@@ -68,7 +68,9 @@ export default defineConfig(({ mode }) => {
     },
 
     server: {
-      host: '0.0.0.0',
+      // 访问范围由 scripts/dev.mjs 通过 DEV_HOST 控制：默认 127.0.0.1（仅 localhost），
+      // 启动时带 --network 参数则绑 0.0.0.0（localhost 与局域网 IP 均可访问）
+      host: process.env.DEV_HOST || '127.0.0.1',
       port: Number(env.VITE_PORT) || 3000,
       open: false,
       // 开发环境接口代理：前端 /api -> 后端真实地址
