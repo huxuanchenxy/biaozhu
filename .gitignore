@@ -27,3 +27,4 @@ pnpm-debug.log*
 # 自托管的翻译模型与 wasm 运行时（体积大，由 `npm run fetch:model` 生成，不入库）
 public/models
 public/wasm
+/src/workers/*.pdf
