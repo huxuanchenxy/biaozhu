@@ -19,18 +19,45 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 膨胀规则（按原始大小，单位 MiB；档位内带随机小数，不再整齐落在 8M/9M/10M）：
   < 1M → 8.1~8.9M    1M~2M → 9.1~9.9M    2M~5M → 10.1~10.9M    > 5M → 规则外，跳过不动
 
+上传前校验（默认开，--verify off 可关）：
+  覆盖上传前先在内存里问一次「这份字节阅读器能不能打开」，判坏的不上传。
+  装了 PyMuPDF（pip install pymupdf）就按真内核判；没装自动降级成零依赖的「尾部指针判定」
+  （只查尾部 1KB 窗口内有没有一条可用的 startxref——恰好就是旧规则产物被判坏的那一条），
+  报告里会写明用的哪种口径，不假装校验过。
+  拦不拦看「双检」结果：
+    产物坏而原件不坏 → 是我们改坏的，拦住不上传（连 _sssss 也不建，下次重跑还会重试）；
+    原件本身就坏 → 源件毛病（膨胀只追加不改写，这类 refix 也修不好），照常上传并记进 source_bad，
+                  不让一个源件问题卡住整批。
+  判据两档绝不混（都是实测出来的）：
+    致命→判坏：startxref / trailer 定位失败。bad.pdf 属此：真指针被推到距尾 9.4MB，WPS 报损坏，
+            而浏览器/pdf.js 自己扫全文重建所以看着正常——只按“能不能打开”判会全部漏报。
+    琐碎→可疑：书签树坏节点、缺字形回退字体。15DZ2260300-01.pdf 只有这一条告警、WPS 实测能打开，
+            跟着判坏会大面积误杀，所以默认只记录不拦（要连可疑也拦：--verify-strict）。
+
 用法（Windows 用 python，Linux 用 python3 或 ./本文件）：
   python pdf_rename_inflate_upload.py -n 10            # 干跑（默认）：只探测+算目标，不改动桶
   python pdf_rename_inflate_upload.py -n 10 --apply    # 真正处理 10 个（只算还没处理的）
   python pdf_rename_inflate_upload.py -n 0 --apply     # 处理全部未处理（慎用）
   python pdf_rename_inflate_upload.py -n 200 -w 4 -q   # 4 线程并发处理 200 个（推荐：进度条不交错）
   python pdf_rename_inflate_upload.py -n 5 --refix --apply   # 重做已处理过的：从 _sssss 取原件按新规则重覆盖
+  python pdf_rename_inflate_upload.py -n 20 --apply --verify tail     # 不装库也拦住「尾部没 startxref」那批
+  python pdf_rename_inflate_upload.py -n 20 --apply --verify-strict   # 连「可疑」也不上传（默认只拦判坏的）
+  python pdf_rename_inflate_upload.py -n 20 --apply --verify off      # 关掉校验（老行为）
   python pdf_rename_inflate_upload.py --refix --refix-only -n 0 -w 8 -q    # 只重做有 _sssss 备份的，新文件不碰
+  python pdf_rename_inflate_upload.py --refix --refix-only -n 0 -w 8 -q --scan-first   # 旧行为：先探完再开工（干跑摸底总数用）
 
   # 只重做点名的某几个文件：把名字填进本文件 CONFIG["FILES"]（写 X.pdf 或 X_sssss.pdf 都算同一个）
   python pdf_rename_inflate_upload.py --files "AP210A.pdf,AP211B_sssss.pdf"        # 干跑看计划
   python pdf_rename_inflate_upload.py --files "AP210A.pdf" --apply                 # 只动这一个
   python pdf_rename_inflate_upload.py --files-from bad.txt --apply                 # 名单来自体检报告
+  python pdf_rename_inflate_upload.py --files-from "pdf_processed_*.log"           # 名单也支持通配（合并历史几轮）
+
+  # 日志：默认每轮都写一份新文件，文件名自动插上本次运行时间戳（启动横幅会打印完整路径）
+  python pdf_rename_inflate_upload.py -n 5 --apply                    # → pdf_processed_20261029145550.log
+  python pdf_rename_inflate_upload.py -n 5 --apply --log-ts off       # 固定文件名、一直往一份里追加
+  python pdf_rename_inflate_upload.py -n 5 --apply --log my.log       # 自取名 → my_20261029145550.log（仍插时间戳）
+  python pdf_rename_inflate_upload.py -n 5 --apply --log ""           # 不写流水日志（Linux；Windows PowerShell 会把
+  python pdf_rename_inflate_upload.py -n 5 --apply --log              #   空串参数吞掉，只写开关不带值就是同一个意思）
 
   # Linux（拷到 /opt/tools 后）：
   chmod +x pdf_rename_inflate_upload.py
@@ -46,7 +73,9 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 
 并发与健壮性：
   - 默认干跑，不写桶；显式 --apply 才改动。
-  - 全程在内存处理，不把 PDF 下载到本地磁盘（无残留、不占空间）；仅在本地写一份 .log 流水日志。
+  - 全程在内存处理，不把 PDF 下载到本地磁盘（无残留、不占空间）；仅在本地写 .log 流水日志，
+    默认每轮一份新文件（文件名插本次运行时间戳），因为这份日志同时是 --files-from 的名单来源，
+    几轮追加进同一份会越滚越大、也分不清哪批是哪一轮做的；--log-ts off 可退回固定名追加。
   - 防重复处理：X_sssss.pdf 存在=已完成则跳过；膨胀版 >5M 不会被再次膨胀；产物 _sssss 不作为源。
     （对同一目录重复跑只会处理“还没做过”的文件；随机档位仅落在新文件上，不动已完成的产品。）
     例外：显式 --refix 才重做已完成文件（拿 sidecar 里的原件重新膨胀覆盖 X.pdf，sidecar 本身不动）。
@@ -54,9 +83,18 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
     只想重做已有备份的那批、不让范围扩大，再加 --refix-only（没有 _sssss 备份的一律不碰）。
   - 定向名单（CONFIG["FILES"] / --files / --files-from / PDF_FILES）：配了就只处理名单里这几个，
     不扫全目录、自动按「重做」语义走（名字写 X.pdf 还是 X_sssss.pdf 都归一到同一份）。
-  - 先并发预筛再处理：跑前用 HEAD 扫一遍目录，把已完成/规则外的文件过滤掉，-n 因此是
-    “接下来要新处理的个数”（而非列表前 N 个）；预筛命中待处理个数后就提前停。
-    代价：列目录默认全量翻页（已处理文件按名称排在前列，截断列表就找不到新文件了）。
+  - 边扫描边处理（默认）：HEAD 扫到一个待处理项就立刻投给处理线程池，不再等整份目录探完
+    才开工（几十万对象时那一步要空等几十分钟、且一个字节都没搬）。扫描只发 HEAD 很轻，
+    几个线程就够（--scan-workers 默认取处理线程数的一半）；处理侧用信号量背压，在途+排队
+    有限，不会堆几十万个任务，Ctrl+C 也能很快收尾。
+    加 --scan-first 回到旧行为（先探完整份目录再开工）：干跑想一眼看清全集总数时用它。
+    -n 语义不变：凑够 limit 个待处理就停止扫描（已投喂的照做完），所以它是“本轮最多做多少个”；
+    想覆盖全集就 -n 0。列目录仍默认全量翻页（截断列表就找不到排在后段的文件）。
+  - 行首 [n/m]：流水线模式下 m 是“提交那一刻已发现的待处理数”，边扫边长，不是最终总数；
+    --scan-first 与定向名单模式下 m 是确定的总数。
+    另外：并行 HEAD 谁先回就先投，所以流水线里的处理顺序只是「大致按名称序」，不再严格
+    等于字典序（对结果没影响：每个文件独立且幂等）；只有 -n 截断时“具体做到哪几个”
+    可能与旧行为差一两行，要完全可复现的顺序就加 --scan-first。
   - 单进程多线程：-w/--workers 指定并发线程数（默认取 CONFIG['WORKERS']）。下载/上传是网络
     I/O 瓶颈，多线程可明显提快；线程共用同一签名客户端，统计/日志/输出均加锁。建议 -w 4~8，
     过大容易撞服务端限流(429)，脚本会自动退避重试。
@@ -68,9 +106,14 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
       · 崩溃自愈：X_ssssss 已存在但 X.pdf 仍小（上次败在覆盖前）→ 从 _sssss 取原件补做覆盖(repair)。
   - 服务端若不支持条件写会自动回退为普通写（此时强烈建议配合 --shard 分片保证不重叠）。
   - 每文件分四步计时，结尾输出总数、各步骤累计耗时、数据量与整体用时。
-  - 静默也有心跳：-q 只关单文件进度条，列目录/预筛这些不下载不上传、容易看着像卡死的阶段，
-    仍每隔 5 秒打一行整行进度（已探测 x/N、待处理几个、约剩多久），nohup 重定向到文件里
-    也照样留痕；间隔可用环境变量 PDF_HEARTBEAT 调（秒）。
+  - 上传前校验（默认开）：判据、双检策略与两档区分见上面「上传前校验」一节。校验明细单独落一份
+    TSV（CONFIG['VERIFY_LOG'] / --verify-report），事后可只拿可疑那一批去人工点验。
+    用内核口径时，从清警告到取警告整段上锁串行（fitz 的警告收集器是进程级全局，多线程会互相
+    串味）；单次 open 只几十毫秒，相对上传几 MB 的秒级耗时可以忽略。
+  - 静默也有心跳：-q 只关单文件进度条，列目录/扫描这些不下载不上传、容易看着像卡死的阶段，
+    仍每隔 5 秒打一行整行进度（已探测 x/N、待处理几个、已处理完几个、约剩多久），流水线
+    模式下探测速度等于处理速度，所以那个“约剩多久”就是整个任务的预估完成时间；
+    nohup/重定向到文件里也照样留痕；间隔可用环境变量 PDF_HEARTBEAT 调（秒）。
 
 Linux/Windows 兼容要点：
   - 纯标准库；Python 3.6+（建议 3.8+）。
@@ -87,6 +130,7 @@ Linux/Windows 兼容要点：
 
 import argparse
 import datetime
+import glob
 import hashlib
 import hmac
 import io
@@ -102,7 +146,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 if sys.version_info < (3, 6):
     sys.exit("需要 Python 3.6 及以上（当前：%s）" % sys.version.split()[0])
@@ -128,7 +172,10 @@ CONFIG = {
     #   临时覆盖：命令行 --files "A.pdf,B_sssss.pdf"，或环境变量 PDF_FILES="A.pdf,B.pdf"。
     "FILES": [],
     #   名单也可以放文本文件里（每行一个文件名，# 开头为注释；这里的路径按本脚本目录解析，
-    #   命令行 --files-from 给的路径则按当前工作目录解析）。
+    #   命令行 --files-from 给的路径则按当前工作目录解析）。本脚本自己的流水日志
+    #   pdf_processed_*.log（TSV，每轮一份带时间戳的新文件）也能直接当名单用：自动取状态列
+    #   后面那个原件名并去重，于是「只重做已建过 _sssss 备份的那批」不用列全目录（列 11 万个
+    #   对象很费时间）；--files-from "pdf_processed_*.log" 可按通配合并历史几轮。
     #   直接把 pdf_check_damaged.py 的 --list-file 产出甚至 CSV 报告行粘进来也能识别。
     #   临时覆盖：--files-from bad.txt（只写参数不带值=禁用）。
     "FILES_FROM": "",
@@ -136,7 +183,17 @@ CONFIG = {
     "AWS_REGION": "us-east-1",
     "AWS_SERVICE": "s3",
     # ---- 本地流水日志（相对本脚本目录；空字符串=禁用）----
+    #   LOG_TS=True（默认）时实际写出的文件名会插上本次运行时间戳：
+    #     pdf_processed.log → pdf_processed_20261029145550.log   每轮一份新文件
+    #   校验明细 VERIFY_LOG 用同一个时间戳（同一轮的两份日志一眼能配对）。
     "LOG_FILE": "pdf_processed.log",
+    "LOG_TS": True,               # False 或 --log-ts off = 沿用固定文件名、逐轮追加
+    # ---- 上传前校验：产物到底能不能被阅读器打开（判据见下面「上传前校验」一节的注释）----
+    #   "auto"：装了 PyMuPDF 就按内核判（pip install pymupdf），没装自动降级成零依赖的尾部指针判定
+    #   "tail"：强制只用零依赖判定（想保住本文件的零依赖跑法时用）；"off"：完全不校验
+    "VERIFY": "auto",
+    "VERIFY_STRICT": False,        # True：连「可疑」（书签树/回退字体一类琐碎告警）也拦下不上传
+    "VERIFY_LOG": "pdf_verify.log",  # 校验明细 TSV（相对本脚本目录；空字符串=不写；同样插运行时间戳）
     # ---- 默认并发线程数 / 单请求重试次数 / 单请求超时（秒）----
     "WORKERS": 4,
     "RETRIES": 4,
@@ -144,6 +201,7 @@ CONFIG = {
 }
 # 覆盖优先级：命令行参数 > 环境变量 > 上面的 CONFIG > 项目 .env（仓库内临时换参数用）。
 #   环境变量名：MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / PDF_PREFIX / PDF_FILES
+#               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_VERIFY_LOG / PDF_LOG_TS
 # 本文件自带连接信息，单独拷到 Linux 机器上就能跑，同级目录不需要任何配置文件。
 
 REGION = CONFIG["AWS_REGION"]
@@ -558,7 +616,7 @@ def _build_auth(endpoint, ak, sk, method, pathname, query, payload_hash, now):
 # 每行注释的字节数。故意不用旧版的一整块 8MB：单行超长注释会让部分阅读器/解析器
 # 判定为非法 PDF（整块里也没有任何换行），折成几 KB 一行更像正常 PDF 内部结构。
 _PAD_LINE = 4 * 1024
-_FILL_BYTE = b"p"           # 填充用的重复字节（可打印字符便于识别）
+_FILL_BYTE = b"\0"           # 填充用的重复字节（可打印字符便于识别）
 _PAD_FOOTER = b"%inflate-end\n%%EOF\n"    # 填充块结束标记
 
 
@@ -783,6 +841,192 @@ def is_pdf_bytes(data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
+# ---------------- 上传前校验：产物到底能不能被阅读器打开 ----------------
+#
+# 为什么加这一层：膨胀只在尾部追加，追加方式一旦让阅读器找不到 startxref，产出的就是
+# 「浏览器凑合能看、WPS 报文件损坏」的废文件。以前只能人工逐个点开才发现（bad.pdf 就是这么
+# 撞上的），现在覆盖上传前先在内存里问一次，判坏的不上传。
+#
+# 判据按实测校准，两档绝不能混（结论与 pdf_check_lib.py 同源）：
+#   致命→拦：startxref / trailer 定位失败那一类。bad.pdf 属此——真指针被推到距尾 9.4MB，
+#          WPS 从尾部回搜 1KB 找不到就报损坏；浏览器/pdf.js 会自己扫全文重建所以看着没事。
+#   琐碎→只记录不拦：书签树坏节点、缺字形回退字体。15DZ2260300-01.pdf 只有这一条告警，
+#          WPS 实测能正常打开；把它算成损坏会大面积误杀。
+# 内核优先级：装了 PyMuPDF（pip install pymupdf）就按真内核判；没装（比如刚部署的 Linux）自动
+# 降级成零依赖的「尾部指针判定」——同样能拦住把指针推走的那类产物，只是查不出别的坏法，
+# 报告里会写明用的哪种口径，不会假装校验过。
+
+_V_BAD, _V_SUSP, _V_OK, _V_SKIP = "bad", "susp", "ok", "skip"
+_TAIL_WIN = 1024            # 阅读器从尾部向前回搜 %%EOF/startxref 的经验窗口（字节）
+_FATAL_PAT = ("cannot find startxref", "cannot find the trailer", "expected trailer",
+              "trying to repair broken xref", "cannot build xref", "xref offset invalid",
+              "page type instead of xref", "cannot find pdf header")
+_TAIL_XREF_ANY_RE = re.compile(rb"startxref\s+(\d{1,20})\s+%%EOF")
+
+_verify_mode = "auto"       # auto=有 fitz 用内核、没有自动降级；tail=强制零依赖；off=不校验
+_verify_strict = False      # True：连「可疑」（琐碎告警，实测 WPS 仍能打开）也拦
+_verify_path = ""           # 校验明细 TSV；空=不写
+_fitz = None
+_fitz_tried = False
+_verify_lock = threading.Lock()     # fitz 的警告收集器是进程级全局，必须整段串行
+_vrep_lock = threading.Lock()
+
+
+def set_verify(mode="auto", strict: bool = False, report: str = ""):
+    global _verify_mode, _verify_strict, _verify_path
+    _verify_mode = str(mode or "auto").lower()
+    _verify_strict = bool(strict)
+    _verify_path = os.path.abspath(report) if report else ""
+
+
+def _load_fitz():
+    """按需导入 fitz；失败只提示一次，开不了就走降级路径，不让依赖问题打断整批任务。"""
+    global _fitz, _fitz_tried
+    if _fitz_tried:
+        return _fitz
+    _fitz_tried = True
+    try:
+        import fitz
+        _fitz = fitz
+    except Exception as e:
+        _fitz = None
+        if _verify_mode == "auto":
+            log(f"提示：导入 PyMuPDF 失败（{type(e).__name__}: {str(e)[:80]}），上传前校验自动降级为"
+                f"「尾部指针判定」；想升级成真正的阅读器口径：pip install pymupdf")
+    return _fitz
+
+
+def verify_desc() -> str:
+    """启动横幅里那句「用哪种口径校验」，说人话，并如实暴露降级。"""
+    if _verify_mode == "off":
+        return "已关（--verify off）"
+    if _verify_mode == "tail":
+        return "尾部指针口径（--verify tail 强制零依赖）"
+    if _load_fitz() is None:
+        return "尾部指针口径（未装 PyMuPDF，pip install pymupdf 可升到内核口径）"
+    return "内核口径（PyMuPDF 走没走修复分支 + 警告指纹）"
+
+
+def verify_pdf(data: bytes) -> tuple:
+    """返回 (level, code, note)，level ∈ bad/susp/ok/skip。只回答「喂给阅读器能不能打开」。
+       不抛异常：校验自己出问题一律当可疑放行，宁多记一条也不因库 API 变动搞挂整批。"""
+    if _verify_mode == "off":
+        return _V_SKIP, "off", "校验已关闭"
+    fitz = None if _verify_mode == "tail" else _load_fitz()
+    if fitz is None:
+        return _verify_tail(data)
+    return _verify_fitz(fitz, data)
+
+
+def _verify_fitz(fitz, data: bytes) -> tuple:
+    try:
+        with _verify_lock:
+            for flag in ("mupdf_display_errors", "mupdf_display_warnings"):
+                fn = getattr(fitz.TOOLS, flag, None)
+                if callable(fn):
+                    fn(False)
+            reset = getattr(fitz.TOOLS, "reset_mupdf_warnings", None)
+            if callable(reset):
+                reset()
+            collector = getattr(fitz.TOOLS, "mupdf_warnings", None)
+            try:
+                doc = fitz.open(stream=data, filetype="pdf")
+            except Exception as e:
+                return _V_BAD, "OPEN_FAIL", "内核直接打不开：%s: %s" % (type(e).__name__, str(e)[:120])
+            try:
+                warns = (collector() if callable(collector) else "") or ""
+                if not warns and callable(getattr(doc, "mupdf_warnings", None)):
+                    warns = doc.mupdf_warnings() or ""      # 个别老版本把警告挂在 Document 上
+                repaired = bool(getattr(doc, "is_repaired", False))
+                pages = doc.page_count
+            finally:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return _V_SUSP, "CHECK_ERROR", "校验自身异常（%s），按可疑放行" % type(e).__name__
+    lines = [w.strip() for w in warns.splitlines() if w.strip()]
+    fatal = next((w for w in lines if any(k in w.lower() for k in _FATAL_PAT)), "")
+    if fatal:
+        return _V_BAD, "XREF_FATAL", "走修复分支且是指针级故障：%s（%s 页）" % (fatal[:120], pages)
+    if repaired or lines:
+        return _V_SUSP, "MINOR_WARN", "能打开，只有琐碎瑕疵：%s（%s 页）" % (
+            (lines[0][:120] if lines else "is_repaired=True 但无警告明细"), pages)
+    return _V_OK, "CLEAN", "%s 页，内核未走修复" % pages
+
+
+def _verify_tail(data: bytes) -> tuple:
+    """零依赖降级：只查尾部窗口内有没有一条位置合法的 startxref。
+       这一条就够拦住旧规则那种「把真指针推到几 MB 之外」的产物；别的坏法查不出，
+       所以结论里写清口径，不假装是内核判的。"""
+    if not data:
+        return _V_BAD, "EMPTY", "0 字节"
+    if not is_pdf_bytes(data):
+        return _V_BAD, "NOT_PDF", "开头没有 %PDF- 魔数"
+    hits = _TAIL_XREF_ANY_RE.findall(data[-_TAIL_WIN:])
+    if not hits:
+        return _V_BAD, "TAIL_NO_STARTXREF", "尾部 %d 字节窗口内找不到 startxref" % _TAIL_WIN
+    off = int(hits[-1])
+    if off <= 0 or off >= len(data):
+        return _V_BAD, "XREF_OFF_RANGE", "尾部 startxref 指向 %d，越出文件长度 %d" % (off, len(data))
+    return _V_OK, "TAIL_OK", "尾部指针在窗口内且指向文件内（未装内核，只查了这一项）"
+
+
+def log_verify(cols) -> None:
+    """校验明细单独落一份 TSV（首行自动补表头），方便事后拿 WPS 只抽查可疑那一批。"""
+    if not _verify_path:
+        return
+    with _vrep_lock:
+        try:
+            need_head = not os.path.exists(_verify_path)
+            with open(_verify_path, "a", encoding="utf-8") as f:
+                if need_head:
+                    f.write("时间\t文件\t口径\t原件\t产物\t是否拦下\t说明\n")
+                f.write("\t".join(str(c) for c in cols).replace("\n", " ") + "\n")
+        except OSError as e:
+            print(f"警告：写校验报告失败：{e}", file=sys.stderr)
+
+
+def verify_pair(fname: str, src: bytes, out: bytes, src_name: str) -> tuple:
+    """上传前双检：先测原件基线、再测产物。返回 (是否拦下, 逐文件短语, 是否全干净)。
+
+    只有一种情况拦：产物判坏而原件不坏——那是我们改坏的，绝不上传。
+    原件本来就坏（源件问题）照常上传并记 source_bad：这类连 refix 也修不好（膨胀只追加不改写），
+    拦下来只会让整批卡在一个源件毛病上，应当交回源头处理。
+    双检口径还能防一类误杀：有些成品只是「原件自带的书签树小瑕」，没有基线就会错算到膨胀头上。
+    """
+    if _verify_mode == "off":
+        return False, "未校验", True
+    lv_src, cd_src, nt_src = verify_pdf(src)
+    lv_out, cd_out, nt_out = verify_pdf(out)
+    blocked = (lv_out == _V_BAD and lv_src != _V_BAD) or (_verify_strict and lv_out == _V_SUSP)
+    clean = (lv_src == _V_OK and lv_out == _V_OK)
+    if blocked and lv_out == _V_BAD:
+        why, tag = (f"产物判坏（{cd_out}）而原件不坏（{cd_src}）：{nt_out}", "产物比原件坏，不上传：" + nt_out)
+    elif blocked:
+        why, tag = (f"严格口径拦下可疑产物（{cd_out}）：{nt_out}", "严格口径拦下可疑件：" + nt_out)
+    elif lv_src == _V_BAD:
+        why, tag = (f"原件本身就坏（{cd_src}），产物不背锅", "源件本身就坏，照传：" + nt_src)
+    elif lv_out == _V_SUSP:
+        why, tag = (f"可疑（{cd_out}），实测这类能打开，照传：{nt_out}", nt_out)
+    else:
+        why, tag = ("", nt_out)
+    with _lock:
+        _stats["verify_checked"] += 1
+        if clean:
+            _stats["verify_ok"] += 1
+        if lv_out == _V_SUSP or lv_src == _V_SUSP:
+            _stats["verify_susp"] += 1
+        if lv_src == _V_BAD:
+            _stats["verify_source_bad"] += 1
+        if blocked:
+            _stats["verify_block"] += 1
+    log_verify((log_ts(), fname, verify_desc(), f"{cd_src} {nt_src}", f"{cd_out} {nt_out}",
+                "是" if blocked else "否", tag))
+    return blocked, why, clean
+
+
 # ---------------- 单文件处理（含并发安全的分类与认领） ----------------
 
 _lock = threading.Lock()
@@ -791,7 +1035,9 @@ _stats = {
     "skip_done": 0, "skip_big": 0, "skip_notpdf": 0, "claim_fail": 0,
     "skip_notrefix": 0,
     "plan_new": 0, "plan_repair": 0, "plan_refix": 0,
-    "t_dl": 0.0, "t_inf": 0.0, "t_pu_s": 0.0, "t_pu_l": 0.0,
+    "verify_checked": 0, "verify_ok": 0, "verify_susp": 0,
+    "verify_source_bad": 0, "verify_block": 0,
+    "t_dl": 0.0, "t_inf": 0.0, "t_pu_s": 0.0, "t_pu_l": 0.0, "t_ver": 0.0,
     "bytes_dl": 0, "bytes_up": 0, "bytes_added": 0,
 }
 
@@ -812,7 +1058,17 @@ def bump(key: str, n: int = 1):
         _stats[key] += n
 
 
+def handled_count() -> int:
+    """已处理完（含失败）的文件个数。只给心跳/进度行当吞吐参照，读不加锁的快照。"""
+    s = _stats
+    return s["processed"] + s["repaired"] + s["refix"] + s["fail"]
+
+
 _LOG_PATH = None  # 本地处理流水日志路径（仅 apply 时写；由 --log / CONFIG 设定）
+
+# 本次运行的统一时间戳（流水日志与校验明细共用一个，两份日志能配对；行内另有一个逐条时间）。
+# 导入时就固定，所以同一轮里多个写入点不会得到不同后缀。
+_RUN_STAMP = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
 
 def set_log_path(path: str):
@@ -822,6 +1078,20 @@ def set_log_path(path: str):
 
 def log_ts() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ts_filename(path: str, enabled: bool = True) -> str:
+    """给日志名插上本次运行时间戳：pdf_processed.log → pdf_processed_20261029145550.log。
+
+    目录与扩展名保持原样（.gz 这类多段后缀也只插在最后一段前）；无扩展名就后接 _时间戳。
+    enabled=False 直接原样返回（退回旧的固定名追加行为）。
+    """
+    if not path or not enabled:
+        return path
+    root, ext = os.path.splitext(path)
+    if not ext or os.path.basename(path).startswith("."):
+        return f"{path}_{_RUN_STAMP}"
+    return f"{root}_{_RUN_STAMP}{ext}"
 
 
 def log_done(entry: str):
@@ -955,6 +1225,14 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             t = time.time()
             inflated, _ = inflate_bytes(data, target)
             t_inf = time.time() - t
+            # 上传前校验：拿 sidecar 里的原件当基线，只有「原件好好的、我们做的产物坏了」才拦
+            t = time.time()
+            blocked, vnote, vclean = verify_pair(fname, data, inflated, src_name)
+            t_ver = time.time() - t
+            if blocked:
+                log(f"[{idx}/{total}] {mk_fail} {fname}：{verb}产物未通过上传前校验，不覆盖 "
+                    f"{fname}（{vnote}）")
+                return
             prog = Progress(f"{fname} 覆盖", len(inflated), quiet, cols, _lock)
             t = time.time()
             client.put_bytes(key, inflated, prog)
@@ -964,6 +1242,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
                 _stats["repaired" if kind == "repair" else "refix"] += 1
                 _stats["t_dl"] += t_dl
                 _stats["t_inf"] += t_inf
+                _stats["t_ver"] += t_ver
                 _stats["t_pu_l"] += t_pu
                 _stats["bytes_dl"] += len(data)
                 _stats["bytes_up"] += len(inflated)
@@ -971,10 +1250,12 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             entry = (f"{'REPAIRED' if kind == 'repair' else 'REFIXED'}\t{fname}\t"
                      f"<- {src_name}(原件副本) + {fname}(膨胀覆盖)\t"
                      f"{human_size(len(data))}->{human_size(len(inflated))}\t"
-                     f"取副本 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 覆盖 {human_secs(t_pu)}")
+                     f"取副本 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
+                     f"覆盖 {human_secs(t_pu)}" + ("" if vclean else f"\t校验：{vnote}"))
             log_done(entry)
             log(f"[{idx}/{total}] {mk_ok} {fname}：{verb}覆盖 {human_size(len(data))}→"
-                f"{human_size(len(inflated))} 膨胀 {human_secs(t_inf)} 覆盖 {human_secs(t_pu)}")
+                f"{human_size(len(inflated))} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
+                f"覆盖 {human_secs(t_pu)}" + ("" if vclean else f"〔{vnote}〕"))
             return
 
         # kind == "new"
@@ -996,6 +1277,14 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         t = time.time()
         inflated, _ = inflate_bytes(data, target)
         t_inf = time.time() - t
+        # 上传前校验：放在「原子认领」之前——拦下的时候连 _sssss 也不建，下次重跑仍会重试，
+        # 不会留下一个“已完成”的假标记让后续轮次跳过这个坏产物
+        t = time.time()
+        blocked, vnote, vclean = verify_pair(fname, data, inflated, sname)
+        t_ver = time.time() - t
+        if blocked:
+            log(f"[{idx}/{total}] {mk_fail} {fname}：膨胀产物未通过上传前校验，不上传（{vnote}）")
+            return
 
         # 原子认领：条件创建 X_sssss.pdf（只有成功者才允许覆盖 X.pdf）
         prog = Progress(f"{fname} 传副本", len(data), quiet, cols, _lock)
@@ -1019,6 +1308,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             _stats["processed"] += 1
             _stats["t_dl"] += t_dl
             _stats["t_inf"] += t_inf
+            _stats["t_ver"] += t_ver
             _stats["t_pu_s"] += t_pu_s
             _stats["t_pu_l"] += t_pu_l
             _stats["bytes_dl"] += len(data)
@@ -1026,11 +1316,14 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             _stats["bytes_added"] += max(0, len(inflated) - len(data))
         entry = (f"PROCESSED\t{fname}\t-> {sname}(原件副本) + {fname}(膨胀版)\t"
                  f"{human_size(len(data))}->{human_size(len(inflated))}\t"
-                 f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}")
+                 f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
+                 f"传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}"
+                 + ("" if vclean else f"\t校验：{vnote}"))
         log_done(entry)
         log(f"[{idx}/{total}] {mk_ok} {fname}：{human_size(size)}→{human_size(len(inflated))} "
-            f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} "
-            f"传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}")
+            f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
+            f"传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}"
+            + ("" if vclean else f"〔{vnote}〕"))
     except Exception as e:
         bump("fail")
         log(f"[{idx}/{total}] {mk_fail} {fname}：{e}")
@@ -1087,7 +1380,10 @@ def entry_candidates(entry: str) -> list:
 
 
 def load_files_from(path: str, from_config: bool = False) -> list:
-    """从文本清单读名单：每行一个文件名，# 开头/空行忽略；整行带逗号的当作一条（CSV 直接粘）。
+    """从文本清单读名单：每行一个文件名，# 开头/空行忽略；整行带逗号的当作一条（CSV 直接粘）；
+       整行带制表符的当作自家流水日志（pdf_processed_*.log 这类 TSV）：取第一个以 .pdf 结尾的字段。
+       路径支持通配（pdf_processed_*.log）：日志现在每轮一份带时间戳的新文件，想拿“历史所有轮”
+       的累计名单当一个清单用就不用手抄文件名；按修改时间从新到旧展开并报出读到哪几份。
        路径解析：命令行 --files-from 给的按当前工作目录理解（跟其它命令行路径一致）；
        CONFIG['FILES_FROM'] 的默认值按脚本目录落地（Linux 上 nohup/systemd 任意目录都能找到）。"""
     if not path:
@@ -1098,21 +1394,52 @@ def load_files_from(path: str, from_config: bool = False) -> list:
         p = os.path.join(_SCRIPT_DIR, path)
     else:
         p = os.path.abspath(path)
-    try:
-        # utf-8-sig：有 BOM 就吃掉，没有也不影响
-        with open(p, encoding="utf-8-sig", errors="replace") as f:
-            lines = [ln.strip().strip("\ufeff").strip() for ln in f]
-    except OSError as e:
-        sys.exit(f"错误：读名单文件失败 {p}：{e}")
+    if any(ch in os.path.basename(p) for ch in "*?["):
+        # 只让通配作用于文件名部分：目录段里带 [ ] 是常见写法（如中文括号），不应被当成模式
+        parts = sorted(glob.glob(p), key=os.path.getmtime, reverse=True)
+        if not parts:
+            sys.exit(f"错误：名单通配没匹配到任何文件：{p}")
+        tail = "…" if len(parts) > 6 else ""
+        print(f"名单通配命中 {len(parts)} 份文件（新→旧）："
+              + "、".join(os.path.basename(x) for x in parts[:6]) + tail)
+        files = parts
+    else:
+        files = [p]
+    lines = []
+    for one in files:
+        try:
+            # utf-8-sig：有 BOM 就吃掉，没有也不影响
+            with open(one, encoding="utf-8-sig", errors="replace") as f:
+                lines.extend(ln.strip().strip("\ufeff").strip() for ln in f)
+        except OSError as e:
+            sys.exit(f"错误：读名单文件失败 {one}：{e}")
     out = []
     for ln in lines:
         if not ln or ln.startswith("#"):
             continue
+        if "\t" in ln:
+            # 自家流水日志这类 TSV：时间、状态、原件名……只取第一个以 .pdf 结尾的字段（就是原件名）。
+            # 后面「-> X_sssss.pdf(原件副本) + X.pdf(膨胀覆盖)」那类附带说明不参与，不然会把产物名
+            # 混进名单（虽然也会被归一回同一个文件，但白白多一堆重复条目）。
+            cand = [x.strip() for x in ln.split("\t") if x.strip().lower().endswith(".pdf")]
+            if not cand:
+                continue
+            ln = cand[0]
         if "," in ln:
             out.append(ln)
         else:
             out.extend(parse_file_list(ln))
-    return out
+    # 去重并保留原有顺序：多轮流水日志叠加、或同一份名单里写了两次同一个文件，都只会让同一个
+    # 对象被 HEAD 好几遍，没意义（4.4 万行名单里这点开销很可观）
+    ded, seen = [], set()
+    for x in out:
+        k = str(x).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            ded.append(x)
+    if len(ded) != len(out):
+        print(f"名单去重：{len(out)} 条 → {len(ded)} 个不同文件（流水日志里同一个文件会被多轮重复记录）")
+    return ded
 
 
 def resolve_files_arg(args) -> list:
@@ -1270,12 +1597,101 @@ def collect_pending(client: Minio, keys: list, limit: int, workers: int,
     return out
 
 
+# ---------------- 流水线：边扫描边处理（默认调度） ----------------
+
+def process_stream(client: Minio, keys: list, limit: int, workers: int, apply: bool,
+                   quiet: bool, cols: int, mk_ok: str, mk_fail: str,
+                   refix: bool = False, refix_legacy: bool = False,
+                   refix_only: bool = False, scan_workers: int = 0) -> tuple:
+    """边 HEAD 边处理：扫到一个待处理项就立刻投给处理线程池，不再等整份目录探完才开工。
+
+    为什么默认走它：几十万对象的目录，光预筛（每个源文件 2 次 HEAD）就要空等几十分钟，
+    这段时间机器只做元数据请求、一个字节都没搬，看着像卡住，实际上是白等。
+    怎么不失控：
+      · 扫描只发 HEAD，很轻，几个线程就能喂饱处理池（默认取 workers//2，至少 2 个）；
+      · 处理侧用信号量背压，在途+排队最多 workers*2+scan_workers 个，所以不会把几十万
+        个任务一次性排进队列（内存友好、 Ctrl+C 也能很快收尾），扫描因此自动放慢；
+      · 心跳里的「约剩多久」于是变成整个任务的预估完成时间（探测速度已等于处理速度）。
+    -n/limit 语义不变：凑够 limit 个待处理就停止扫描（已投喂的照旧做完再收尾）。
+    行首 [n/m] 的 m 是「提交那一刻已发现的待处理数」，边扫边长，不是最终总数。
+    返回 (探测个数, 发现并投喂个数)。
+    """
+    scan_workers = max(2, scan_workers if scan_workers > 0 else workers // 2)
+    inflight = threading.Semaphore(workers * 2 + scan_workers)
+    hb = Heartbeat("扫描中，已探测", quiet, len(keys))
+    st = {"probed": 0, "found": 0, "ran": 0}
+
+    def probe(key):
+        return key, classify_safe(client, key, refix, refix_legacy, refix_only)
+
+    def work(key, idx, total_hint, kind, size, artifact):
+        try:
+            process_one(client, key, idx, total_hint, apply, quiet, cols, mk_ok, mk_fail,
+                        pre=(kind, size, artifact), refix_only=refix_only)
+        finally:
+            inflight.release()          # 不管成败都要归还额度，否则背压会锁死
+
+    scan_window = scan_workers * 8
+    interrupted = False
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pdf") as pool, \
+            ThreadPoolExecutor(max_workers=scan_workers, thread_name_prefix="scan") as scan:
+        try:
+            backlog = set()
+            fi = 0
+            while True:
+                # 补满扫描窗口（-n 凑够就不再扫；已投喂的照做完）
+                while (len(backlog) < scan_window and fi < len(keys)
+                       and (limit <= 0 or st["found"] < limit)):
+                    backlog.add(scan.submit(probe, keys[fi]))
+                    fi += 1
+                if not backlog:
+                    break
+                done, backlog = wait(backlog, return_when=FIRST_COMPLETED)
+                for f in done:
+                    # -n 凑够就收：本批剩下的探测结果不再分类（窗口里已发出去的 HEAD 拉不回，
+                    #    但绝不能再多投一个任务，否则 -n 就超发了）
+                    if limit > 0 and st["found"] >= limit:
+                        break
+                    key, (kind, size, artifact) = f.result()
+                    st["probed"] += 1
+                    hb.tick(st["probed"], f"待处理 {st['found']}，已处理完 {handled_count()}")
+                    if kind in ("new", "repair", "refix"):
+                        st["found"] += 1
+                        st["ran"] += 1
+                        inflight.acquire()
+                        pool.submit(work, key, st["ran"], st["found"], kind, size, artifact)
+                    elif kind == "done":
+                        bump("skip_done")
+                    elif kind == "big":
+                        bump("skip_big")
+                    elif kind == "notrefix":
+                        bump("skip_notrefix")
+                if not quiet:
+                    print(f"扫描中：已探测 {st['probed']}/{len(keys)}，待处理 {st['found']}，"
+                          f"已处理完 {handled_count()} 个…", end="\r", flush=True)
+                if limit > 0 and st["found"] >= limit:
+                    break            # 停止扫描（已投喂的照旧做完）
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            if not quiet:
+                print(" " * 70, end="\r", flush=True)
+        # with 退出会等两个池收尾（受背压限制，量很小），所以中断提示打在后面
+    if interrupted:
+        log("\n[中断] 已停止扫描；在途与已排队的文件已做完，以下为这部分统计：")
+    tail = (f"／无备份不碰 {_stats['skip_notrefix']}" if _stats["skip_notrefix"] else "")
+    log(f"  扫描结束：探测 {st['probed']}/{len(keys)}，投喂 {st['ran']} 个待处理"
+        f"（跳过：已完成 {_stats['skip_done']}／>5M {_stats['skip_big']}{tail}）")
+    return st["probed"], st["found"]
+
+
 # ---------------- 线程池收尾（兼容无 cancel_futures 的老 Python） ----------------
 
-def shutdown_pool(pool, wait: bool = False):
-    """尽量取消未启动的任务；Python < 3.9 无 cancel_futures 参数时降级。"""
+def shutdown_pool(pool, block: bool = False):
+    """尽量取消未启动的任务；Python < 3.9 无 cancel_futures 参数时降级。
+       （形参叫 block 不叫 wait：模块层已从 concurrent.futures 导入了 wait）"""
     try:
-        pool.shutdown(wait=wait, cancel_futures=True)
+        pool.shutdown(wait=block, cancel_futures=True)
     except TypeError:
         pool.shutdown(wait=False)
 
@@ -1291,7 +1707,16 @@ def print_summary(apply: bool, secs: float):
               f"（已完成 {s['skip_done']}／他人认领 {s['claim_fail']}／>5M {s['skip_big']}"
               f"／非PDF {s['skip_notpdf']}／无备份不碰 {s['skip_notrefix']}）")
         print(f"各步骤累计耗时：下载 {human_secs(s['t_dl'])}，膨胀 {human_secs(s['t_inf'])}，"
+              f"上传前校验 {human_secs(s['t_ver'])}，"
               f"传原件(_sssss) {human_secs(s['t_pu_s'])}，传扩大 {human_secs(s['t_pu_l'])}")
+        if _verify_mode != "off":
+            print(f"上传前校验：查了 {s['verify_checked']} 组，全干净 {s['verify_ok']}，"
+                  f"可疑（只记录）{s['verify_susp']}，原件本身就坏（照传，不背锅）{s['verify_source_bad']}，"
+                  f"拦下未上传 {s['verify_block']}")
+            if s["verify_block"]:
+                print(f"注意：{s['verify_block']} 个产物没上传（桶里仍是原样，也没建 _sssss，重跑会重试）——"
+                      f"默认口径下拦的都是「产物比原件坏」（膨胀环节的问题），--verify-strict 还会多拦一批可疑件；"
+                      f"具体看校验报告那几行的「是否拦下」")
         print(f"数据量：下载 {human_size(s['bytes_dl'])}，上传 {human_size(s['bytes_up'])}"
               f"（其中新增填充 {human_size(s['bytes_added'])}）")
         ndone = s["processed"] + s["repaired"] + s["refix"]
@@ -1303,6 +1728,8 @@ def print_summary(apply: bool, secs: float):
               f"（已完成 {s['skip_done']}／>5M {s['skip_big']}／无备份不碰 {s['skip_notrefix']}），"
               f"失败 {s['fail']}")
         print("（干跑：未下载/膨胀/上传，无步骤耗时；确认无误后加 --apply 执行）")
+        if _verify_mode != "off":
+            print("（干跑不下载，所以也没做上传前校验；--apply 时才会逐份校验产物能不能打开）")
 
 
 # ---------------- 入口 ----------------
@@ -1332,9 +1759,26 @@ def main():
                         help="Access Key；不传则用环境变量 MINIO_ACCESS_KEY 或 CONFIG['MINIO_ACCESS_KEY']")
     parser.add_argument("--secret-key", default=None,
                         help="Secret Key；不传则用环境变量 MINIO_SECRET_KEY 或 CONFIG['MINIO_SECRET_KEY']")
-    parser.add_argument("--log", default=None,
-                        help=f"本地处理流水日志（相对路径按脚本目录解析；空字符串=禁用）；"
-                             f"不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}）")
+    parser.add_argument("--log", default=None, nargs="?", const="",
+                        help=f"本地处理流水日志（相对路径按脚本目录解析）；"
+                             f"不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}）；"
+                             f"只写参数不带值=不写日志")
+    parser.add_argument("--log-ts", default=None, choices=("on", "off"),
+                        help=f"日志文件名插上本次运行时间戳（每轮一份新文件，流水日志与校验明细同一"
+                             f"个时间戳）；off=沿用固定文件名逐轮追加；"
+                             f"不传则用 CONFIG['LOG_TS']（当前：{CONFIG['LOG_TS']}）")
+    parser.add_argument("--verify", default=None, choices=("auto", "tail", "off"),
+                        help=f"上传前在内存里校验产物能不能被阅读器打开，判坏的不上传；"
+                             f"auto=装了 PyMuPDF 就用内核判、没装自动降级为尾部指针判定；"
+                             f"tail=强制零依赖口径；off=不校验（老行为）；"
+                             f"不传则用 CONFIG['VERIFY']（当前：{CONFIG['VERIFY']}）")
+    parser.add_argument("--verify-strict", action="store_true",
+                        help="严格口径：连「可疑」（书签树/回退字体这类实测仍能打开的琐碎告警）"
+                             "也拦下不上传；默认只拦 startxref/trailer 定位失败那一类")
+    parser.add_argument("--verify-report", default=None, nargs="?", const="",
+                        help=f"校验明细 TSV（相对路径按脚本目录解析，每行记：口径/原件结论/产物结论/"
+                             f"是否拦下）；不传则用 CONFIG['VERIFY_LOG']（当前：{CONFIG['VERIFY_LOG']}）；"
+                             f"只写参数不带值=不写")
     parser.add_argument("-n", "--limit", type=int, default=None,
                         help="本轮处理上限（只计本轮真要动的文件）；全目录模式默认 10，"
                              "定向名单模式默认=名单全做；0=不限")
@@ -1347,6 +1791,12 @@ def main():
                              "只写参数不带值=关闭名单")
     parser.add_argument("--list-cap", type=int, default=0,
                         help="列目录最多收集多少个 PDF 就提前停（0=全量翻页；多机分片须各机设成相同值以保证全集一致）")
+    parser.add_argument("--scan-first", action="store_true",
+                        help="老行为：先用 HEAD 把整份目录预筛完再开始处理（几十万对象时要空等几十分钟）；"
+                             "默认已改成边扫边做。干跑想一次看清全集总数时用它")
+    parser.add_argument("--scan-workers", type=int, default=0,
+                        help="流水线里专责 HEAD 扫描的线程数（0=自动：取处理线程数的一半、至少 2 个）；"
+                             "扫描只发 HEAD 很轻，一般不用调大")
     parser.add_argument("--shards", type=int, default=1, help="多机并发总台数 N（按稳定顺序 index%%N 分片）")
     parser.add_argument("--shard", type=int, default=0, help="本机分片编号 0..N-1")
     parser.add_argument("--retries", type=int, default=None,
@@ -1384,18 +1834,42 @@ def main():
         parser.error("-n/--limit 不能为负数")
 
     client = Minio(endpoint, ak, sk, retries=retries, no_cond=args.no_cond)
+    # 日志名默认插上本次运行时间戳（每轮一份新文件）：这份日志同时是 --files-from 的名单
+    # 来源，滚在同一份里会越读越混、分不出哪批是哪一轮做的。
+    ts_mode = str(_pick("LOG_TS", args.log_ts, env_name="PDF_LOG_TS") or "on").lower()
+    log_ts_on = ts_mode not in ("0", "false", "no", "off")
     # 日志路径：未显式传 --log 时用 CONFIG['LOG_FILE']；相对路径一律落在脚本同目录，
     # 便于 Linux 上 nohup/systemd 任意工作目录运行都能找到同一份流水日志。
     raw_log = str(CONFIG.get("LOG_FILE") or "") if args.log is None else args.log
+    raw_log = ts_filename(raw_log, log_ts_on)
     log_path = "" if not raw_log else (
         raw_log if os.path.isabs(raw_log) else os.path.join(_SCRIPT_DIR, raw_log))
     if log_path:
         set_log_path(os.path.abspath(log_path))
 
+    # 上传前校验的配置（命令行 > 环境变量 > CONFIG），详见「上传前校验」一节
+    vmode = str(_pick("VERIFY", args.verify, env_name="PDF_VERIFY") or "auto").lower()
+    if vmode not in ("auto", "tail", "off"):
+        parser.error(f"--verify 只认 auto/tail/off（当前：{vmode}）")
+    vstrict = bool(args.verify_strict) or str(_pick("VERIFY_STRICT", None, env_name="PDF_VERIFY_STRICT")).lower() \
+        in ("1", "true", "yes", "on")
+    raw_vrep = str(CONFIG.get("VERIFY_LOG") or "") if args.verify_report is None else args.verify_report
+    raw_vrep = ts_filename(raw_vrep, log_ts_on)
+    vrep_path = "" if not raw_vrep else (
+        raw_vrep if os.path.isabs(raw_vrep) else os.path.join(_SCRIPT_DIR, raw_vrep))
+    set_verify(vmode, vstrict, vrep_path)
+
     cols = shutil.get_terminal_size((100, 24)).columns
     mk_ok, mk_fail = make_marks()
     dry_note = "" if args.apply else "（干跑：不会改动桶内容，加 --apply 才执行）"
-    log_note = f"日志={os.path.abspath(log_path)}" if log_path else "日志=关闭"
+    log_note = (f"日志={os.path.abspath(log_path)}" + ("（本轮新文件）" if log_ts_on else "（固定名追加）")) \
+        if log_path else "日志=关闭"
+    if vmode == "off":
+        verify_note = "上传前校验：已关（--verify off）"
+    else:
+        verify_note = (f"上传前校验：{verify_desc()}，"
+                       + (f"明细={os.path.abspath(vrep_path)}" if vrep_path else "明细=不写")
+                       + ("；严格：可疑也拦" if vstrict else "；只拦「产物比原件坏」那批，可疑只记录"))
     t_scan = time.time()
 
     if wanted:
@@ -1412,9 +1886,17 @@ def main():
         print("名单语义：X.pdf 与 X_sssss.pdf 算同一个文件；已膨胀过的从 _sssss 取原件按当前规则"
               "重新膨胀并覆盖 X.pdf（_sssss 不动），没处理过的正常处理")
         print(f"PDF 全程内存处理不落盘（无本地残留）；{log_note}")
+        print(verify_note)
         if workers > 1 and not args.quiet:
             print("提示：多线程下各文件进度条会交错，可加 -q 只看逐文件结果行")
         print()
+
+        if limit > 0 and len(wanted) > limit:
+            # 名单模式先按 -n 截断再去定位：否则 4 万行名单要先把 4 万个名字全 HEAD 一轮才轮得到 -n，
+            # 想试跑 5 个也得等半天。未命中的会逐条照实报，要全量定位就 -n 0。
+            print(f"提示：名单共 {len(wanted)} 个条目，按 -n {limit} 只定位处理前 {limit} 个"
+                  f"（要全量定位就 -n 0）")
+            wanted = wanted[:limit]
 
         pending, misses, dup = resolve_named_targets(client, prefix, wanted, workers,
                                                      args.refix_only)
@@ -1453,16 +1935,34 @@ def main():
         print(f"模式：{'APPLY' if args.apply else 'DRY-RUN'}{shard_note}{dry_note}")
         print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}）")
         print(f"目录：{prefix}")
-        print(f"目录共 {len(sources)} 个源文件（已排除产物后缀），并发 {workers} 线程先预筛哪些还没处理")
+        print(f"目录共 {len(sources)} 个源文件（已排除产物后缀），"
+              + ("先并发预筛完再处理（--scan-first）" if args.scan_first
+                 else "边扫描边处理：HEAD 扫到待处理的就立刻开工，不空等预筛"))
         if args.refix:
             print("重做模式（--refix）：已处理过的文件也会被列入待处理，用 sidecar 里的原件重新膨胀覆盖"
                   + ("（含历史后缀）" if args.refix_legacy else "（仅 _sssss，历史后缀需 --refix-legacy）"))
         if args.refix_only:
             print("只重做模式（--refix-only）：没有任何 _sssss 备份的文件本轮不碰，不会新建")
         print(f"PDF 全程内存处理不落盘（无本地残留）；{log_note}")
+        print(verify_note)
         if workers > 1 and not args.quiet:
             print("提示：多线程下各文件进度条会交错，可加 -q 只看逐文件结果行")
         print()
+
+        if not args.scan_first:
+            # 默认流水线：以前要先用 HEAD 把整份目录探完（几十万对象≈几十分钟）才开工，
+            # 这段时间一个字节都没搬；现在扫到一个就投一个，处理池立刻动起来。
+            t_all = time.time()
+            probed, found = process_stream(
+                client, sources, limit, workers, args.apply, args.quiet, cols, mk_ok, mk_fail,
+                args.refix, args.refix_legacy, args.refix_only, args.scan_workers)
+            if found == 0:
+                print(f"探测了 {probed} 个源文件：没有匹配的待处理项"
+                      f"（已完成跳过 {_stats['skip_done']}／>5M 跳过 {_stats['skip_big']}）")
+            print_summary(args.apply, time.time() - t_all)
+            if _stats["fail"]:
+                sys.exit(2)
+            return
 
         pending = collect_pending(client, sources, limit, workers, args.quiet,
                                   args.refix, args.refix_legacy, args.refix_only)
