@@ -28,3 +28,7 @@ pnpm-debug.log*
 public/models
 public/wasm
 /src/workers/*.pdf
+# pdf_download.py 批量下载的语料 PDF（体积大，不入库）
+/src/workers/pdf/
+# Python 字节码缓存（脚本被 import 时自动生成，无用可删）
+__pycache__/
