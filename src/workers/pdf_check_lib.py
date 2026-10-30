@@ -28,12 +28,17 @@
   BLANK_PAGE       能画但整页几乎全白（内容丢了/图片没进来）→ 默认可疑，--blank-as broken 可提级
   NOT_PDF          头部没有 %PDF- 魔数            EMPTY       0 字节
   PAGES_ZERO       能打开但页数为 0
-三条实测踩出来的红线，别写反：
+四条实测踩出来的红线，别写反：
   - 不能拿「提取不到文字」判损坏：bad.pdf 文本层 0 字符，页面画面却完全正常（扫描件/图片型）。
   - 不能拿「能渲染」判正常：bad.pdf 三个内核都渲染成功，它照样是要重做的旧填充产物。
   - 也不能拿「走了修复分支」一概判坏：15DZ2260300-01.pdf（新规则产物）只有一条
     「repaired broken tree structure in outline」书签树告警，WPS 实测能正常打开。
-    能判坏的只有 startxref / trailer 定位失败那一类致命指纹。
+  - 更不能拿「xref 被重建」判坏：04A11310…/04801490…（iText 增量更新件）报
+    「expected trailer marker」+「trying to repair broken xref」，但尾部 startxref 距尾只 23 字节、
+    指向确实是 xref 表，17/10 页全部渲染正常——2026-10-29 这两份加一份 CLEAN 对照人肉用 WPS
+    点验，三份全部正常打开。它们跟 bad.pdf（尾部根本找不到 startxref、真指针被推到距尾 9.4MB，
+    WPS 报损坏）不是一回事。
+    能判坏的只有「尾部指针不可用」那一类致命指纹。
 
 用法（默认就是 WPS 那种严格口径，一条命令够了）：
   python pdf_check_lib.py bad.pdf                      # ← 就这个：一句大白话告诉你坏没坏、坏在哪
@@ -71,10 +76,15 @@ LEVEL_ORDER = {BROKEN: 0, WARN: 1, OK: 2}
 LEVEL_MARK = {OK: "✓", WARN: "!", BROKEN: "✗", "skip": "-"}
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 「严格阅读器会挂」的指纹：出现这些，说明 xref/尾部定位已经不可用，引擎是靠全盘扫描兜底才读到的
-FATAL_PATTERNS = ("cannot find startxref", "cannot find the trailer", "trying to repair broken xref",
-                  "cannot build xref", "expected trailer", "xref offset invalid",
+# 「严格阅读器会挂」的指纹：只收尾部指针不可用那一类。判定样本是 bad.pdf 与旧规则产物
+# （指针被推走 / 偏移说谎），WPS 实测报损坏。
+# 已按实测踢出两条：“expected trailer”与“trying to repair broken xref”——它们是内核重建 xref
+# 的流水，iText 增量更新件也报但 WPS 能正常打开，当判坏依据会大面积误杀。
+FATAL_PATTERNS = ("cannot find startxref", "cannot find the trailer",
+                  "cannot build xref", "xref offset invalid",
                   "cannot find pdf header", "page type instead of xref")
+# 「内核重建了 xref 才读到」但不等于打不开：单独一档只记不拦
+REBUILD_PATTERNS = ("expected trailer", "trying to repair broken xref", "repairing pdf document")
 # 「与能不能打开无关」的指纹：书签树、字体替换一类，别当损坏
 COSMETIC_PATTERNS = ("outline", "tree structure", "fallback font", "cannot find font")
 FAST_AUTO = ("fitz", "pdfium")          # auto 只用这两个：快，且分别对应 mupdf 与浏览器原生
@@ -141,10 +151,11 @@ def basic_gate(path: str, r: dict) -> bool:
 
 
 def classify_warns(lines) -> tuple:
-    """把引擎警告分成致命/琐碎两堆，返回 (fatal命中, cosmetic命中)。"""
+    """把引擎警告分成致命/需重建/琐碎三堆，返回 (fatal命中, cosmetic命中, rebuild命中)。"""
     fatal = [w for w in lines if any(k in w.lower() for k in FATAL_PATTERNS)]
     cos = [w for w in lines if any(k in w.lower() for k in COSMETIC_PATTERNS)]
-    return fatal, cos
+    rebuild = [w for w in lines if any(k in w.lower() for k in REBUILD_PATTERNS)]
+    return fatal, cos, rebuild
 
 
 def grade_repaired(repaired_as: str, fatal: bool) -> str:
@@ -202,10 +213,11 @@ def eng_fitz(path: str, opt) -> dict:
             r.update(code="LIB_RENDER_FAIL", level=BROKEN,
                      note=f"抽样 {min(pages, opt.max_pages)} 页中 {len(fails)} 页画不出来：{fails[:3]}")
         elif repaired or r["warns"]:
-            fatal, cos = classify_warns(r["warns"])
+            fatal, cos, rebuild = classify_warns(r["warns"])
             r.update(code="LIB_REPAIRED", level=grade_repaired(opt.repaired_as, bool(fatal)),
                      note=("MuPDF 走修复分支" if repaired else "MuPDF 报格式警告")
                           + ("；含致命指纹，按 xref 定位的严格读法会挂" if fatal
+                             else "；内核重建了 xref（指针在位、页码齐全，实测能打开）" if rebuild
                              else "；仅琐碎告警（书签/字体一类），不该判坏" if cos
                              else "；修复原因未归类，不当损坏处理"))
         elif blanks:

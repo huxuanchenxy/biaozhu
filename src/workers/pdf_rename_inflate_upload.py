@@ -23,16 +23,20 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   覆盖上传前先在内存里问一次「这份字节阅读器能不能打开」，判坏的不上传。
   装了 PyMuPDF（pip install pymupdf）就按真内核判；没装自动降级成零依赖的「尾部指针判定」
   （只查尾部 1KB 窗口内有没有一条可用的 startxref——恰好就是旧规则产物被判坏的那一条），
-  报告里会写明用的哪种口径，不假装校验过。
+  启动横幅里会写明用的哪种口径，不假装校验过。
   拦不拦看「双检」结果：
     产物坏而原件不坏 → 是我们改坏的，拦住不上传（连 _sssss 也不建，下次重跑还会重试）；
     原件本身就坏 → 源件毛病（膨胀只追加不改写，这类 refix 也修不好），照常上传并记进 source_bad，
                   不让一个源件问题卡住整批。
-  判据两档绝不混（都是实测出来的）：
-    致命→判坏：startxref / trailer 定位失败。bad.pdf 属此：真指针被推到距尾 9.4MB，WPS 报损坏，
-            而浏览器/pdf.js 自己扫全文重建所以看着正常——只按“能不能打开”判会全部漏报。
+  判据三档绝不混（都是实测出来的）：
+    致命→判坏：尾部指针根本不可用。bad.pdf 属此：真指针被推到距尾 9.4MB（尾部回搜 1KB 找不到），
+            WPS 报损坏，而浏览器/pdf.js 自己扫全文重建所以看着正常——只按“能不能打开”判会全部漏报。
+    需重建→可疑：内核重建了 xref 才读到，但尾部指针在位、页码齐全。04A11310…/04801490…（iText
+            增量更新件）属此：告警是 expected trailer marker + trying to repair broken xref，
+            而 startxref 距尾只 23 字节、指向确实是 xref 表，WPS 实测正常打开——拦它就是把好件判废。
     琐碎→可疑：书签树坏节点、缺字形回退字体。15DZ2260300-01.pdf 只有这一条告警、WPS 实测能打开，
             跟着判坏会大面积误杀，所以默认只记录不拦（要连可疑也拦：--verify-strict）。
+  日志里不区分后面两档：只写「正常 / 打不开」——能开就算正常，只有致命档才写打不开。
 
 用法（Windows 用 python，Linux 用 python3 或 ./本文件）：
   python pdf_rename_inflate_upload.py -n 10            # 干跑（默认）：只探测+算目标，不改动桶
@@ -106,8 +110,9 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
       · 崩溃自愈：X_ssssss 已存在但 X.pdf 仍小（上次败在覆盖前）→ 从 _sssss 取原件补做覆盖(repair)。
   - 服务端若不支持条件写会自动回退为普通写（此时强烈建议配合 --shard 分片保证不重叠）。
   - 每文件分四步计时，结尾输出总数、各步骤累计耗时、数据量与整体用时。
-  - 上传前校验（默认开）：判据、双检策略与两档区分见上面「上传前校验」一节。校验明细单独落一份
-    TSV（CONFIG['VERIFY_LOG'] / --verify-report），事后可只拿可疑那一批去人工点验。
+  - 上传前校验（默认开）：判据与双检策略见上面「上传前校验」一节。日志只有一份：校验结论不单独
+    落文件，就接在流水日志每行最后那一列，只说两件事——源件（_sssss 原件）正常/打不开、膨胀过的
+    文件正常/打不开（能打开就算正常，不写告警流水）；只有打不开才附一句短因。
     用内核口径时，从清警告到取警告整段上锁串行（fitz 的警告收集器是进程级全局，多线程会互相
     串味）；单次 open 只几十毫秒，相对上传几 MB 的秒级耗时可以忽略。
   - 静默也有心跳：-q 只关单文件进度条，列目录/扫描这些不下载不上传、容易看着像卡死的阶段，
@@ -185,7 +190,7 @@ CONFIG = {
     # ---- 本地流水日志（相对本脚本目录；空字符串=禁用）----
     #   LOG_TS=True（默认）时实际写出的文件名会插上本次运行时间戳：
     #     pdf_processed.log → pdf_processed_20261029145550.log   每轮一份新文件
-    #   校验明细 VERIFY_LOG 用同一个时间戳（同一轮的两份日志一眼能配对）。
+    #   这是本轮唯一的日志：上传前校验的结论就在每行最后一列，不再第二份文件。
     "LOG_FILE": "pdf_processed.log",
     "LOG_TS": True,               # False 或 --log-ts off = 沿用固定文件名、逐轮追加
     # ---- 上传前校验：产物到底能不能被阅读器打开（判据见下面「上传前校验」一节的注释）----
@@ -193,7 +198,6 @@ CONFIG = {
     #   "tail"：强制只用零依赖判定（想保住本文件的零依赖跑法时用）；"off"：完全不校验
     "VERIFY": "auto",
     "VERIFY_STRICT": False,        # True：连「可疑」（书签树/回退字体一类琐碎告警）也拦下不上传
-    "VERIFY_LOG": "pdf_verify.log",  # 校验明细 TSV（相对本脚本目录；空字符串=不写；同样插运行时间戳）
     # ---- 默认并发线程数 / 单请求重试次数 / 单请求超时（秒）----
     "WORKERS": 4,
     "RETRIES": 4,
@@ -201,7 +205,7 @@ CONFIG = {
 }
 # 覆盖优先级：命令行参数 > 环境变量 > 上面的 CONFIG > 项目 .env（仓库内临时换参数用）。
 #   环境变量名：MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / PDF_PREFIX / PDF_FILES
-#               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_VERIFY_LOG / PDF_LOG_TS
+#               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_LOG_TS
 # 本文件自带连接信息，单独拷到 Linux 机器上就能跑，同级目录不需要任何配置文件。
 
 REGION = CONFIG["AWS_REGION"]
@@ -847,9 +851,14 @@ def is_pdf_bytes(data: bytes) -> bool:
 # 「浏览器凑合能看、WPS 报文件损坏」的废文件。以前只能人工逐个点开才发现（bad.pdf 就是这么
 # 撞上的），现在覆盖上传前先在内存里问一次，判坏的不上传。
 #
-# 判据按实测校准，两档绝不能混（结论与 pdf_check_lib.py 同源）：
-#   致命→拦：startxref / trailer 定位失败那一类。bad.pdf 属此——真指针被推到距尾 9.4MB，
+# 判据按实测校准，三档绝不能混（结论与 pdf_check_lib.py 同源）：
+#   致命→拦：尾部指针根本不可用。bad.pdf 属此——真指针被推到距尾 9.4MB，
 #          WPS 从尾部回搜 1KB 找不到就报损坏；浏览器/pdf.js 会自己扫全文重建所以看着没事。
+#   需重建→只记录不拦：内核重建了 xref 才读到，但尾部 startxref 在位、页码齐全。iText
+#          增量更新件属此（04A11310… 17 页 / 04801490… 10 页，告警为 expected trailer
+#          marker + trying to repair broken xref，而 startxref 距尾只 23 字节且指向真 xref 表），
+#          2026-10-29 已拿这两份原件加一份 CLEAN 对照在 WPS 里人工点验，三份全部正常打开
+#          ——把它算成损坏就是误杀。
 #   琐碎→只记录不拦：书签树坏节点、缺字形回退字体。15DZ2260300-01.pdf 只有这一条告警，
 #          WPS 实测能正常打开；把它算成损坏会大面积误杀。
 # 内核优先级：装了 PyMuPDF（pip install pymupdf）就按真内核判；没装（比如刚部署的 Linux）自动
@@ -858,25 +867,28 @@ def is_pdf_bytes(data: bytes) -> bool:
 
 _V_BAD, _V_SUSP, _V_OK, _V_SKIP = "bad", "susp", "ok", "skip"
 _TAIL_WIN = 1024            # 阅读器从尾部向前回搜 %%EOF/startxref 的经验窗口（字节）
-_FATAL_PAT = ("cannot find startxref", "cannot find the trailer", "expected trailer",
-              "trying to repair broken xref", "cannot build xref", "xref offset invalid",
-              "page type instead of xref", "cannot find pdf header")
+# 「严格阅读器会挂」的指纹：只收「尾部指针不可用」那一类。判定证据是 bad.pdf 与旧规则产物
+# （指针被推走 / 偏移说谎），WPS 实测报损坏。
+# 已经按实测从本表里踢出去两条：expected trailer marker、trying to repair broken xref（它们是
+# 内核重建 xref 的流水，iText 增量更新件也报、但三份样本人工在 WPS 里全部正常打开，
+# 当依据会大面积误杀）。
+_FATAL_PAT = ("cannot find startxref", "cannot find the trailer", "cannot build xref",
+              "xref offset invalid", "page type instead of xref", "cannot find pdf header")
+# 含这些词说明毛病在 xref/页表层（而不是书签字体一类），可疑级别里单独给个编码方便事后统计
+_XREF_REBUILD_PAT = ("xref", "trailer", "repairing", "rebuild")
 _TAIL_XREF_ANY_RE = re.compile(rb"startxref\s+(\d{1,20})\s+%%EOF")
 
 _verify_mode = "auto"       # auto=有 fitz 用内核、没有自动降级；tail=强制零依赖；off=不校验
 _verify_strict = False      # True：连「可疑」（琐碎告警，实测 WPS 仍能打开）也拦
-_verify_path = ""           # 校验明细 TSV；空=不写
 _fitz = None
 _fitz_tried = False
 _verify_lock = threading.Lock()     # fitz 的警告收集器是进程级全局，必须整段串行
-_vrep_lock = threading.Lock()
 
 
-def set_verify(mode="auto", strict: bool = False, report: str = ""):
-    global _verify_mode, _verify_strict, _verify_path
+def set_verify(mode="auto", strict: bool = False):
+    global _verify_mode, _verify_strict
     _verify_mode = str(mode or "auto").lower()
     _verify_strict = bool(strict)
-    _verify_path = os.path.abspath(report) if report else ""
 
 
 def _load_fitz():
@@ -949,10 +961,15 @@ def _verify_fitz(fitz, data: bytes) -> tuple:
     lines = [w.strip() for w in warns.splitlines() if w.strip()]
     fatal = next((w for w in lines if any(k in w.lower() for k in _FATAL_PAT)), "")
     if fatal:
-        return _V_BAD, "XREF_FATAL", "走修复分支且是指针级故障：%s（%s 页）" % (fatal[:120], pages)
+        return _V_BAD, "XREF_FATAL", "走修复分支且尾部指针不可用：%s（%s 页）" % (fatal[:120], pages)
     if repaired or lines:
-        return _V_SUSP, "MINOR_WARN", "能打开，只有琐碎瑕疵：%s（%s 页）" % (
-            (lines[0][:120] if lines else "is_repaired=True 但无警告明细"), pages)
+        first = (lines[0][:120] if lines else "is_repaired=True 但无警告明细")
+        if any(k in w.lower() for w in lines for k in _XREF_REBUILD_PAT):
+            # 内核重建了 xref 才读到，但指针在位、页码齐全：实测 WPS 这类严格阅读器也能打开，
+            # 所以只记不拦；真坏的那一类已经被上面 XREF_FATAL 接住了
+            return _V_SUSP, "XREF_REBUILT", "内核重建了 xref（指针在位、页码齐全，不拦）：%s（%s 页）" % (
+                first, pages)
+        return _V_SUSP, "MINOR_WARN", "能打开，只有琐碎瑕疵：%s（%s 页）" % (first, pages)
     return _V_OK, "CLEAN", "%s 页，内核未走修复" % pages
 
 
@@ -973,23 +990,19 @@ def _verify_tail(data: bytes) -> tuple:
     return _V_OK, "TAIL_OK", "尾部指针在窗口内且指向文件内（未装内核，只查了这一项）"
 
 
-def log_verify(cols) -> None:
-    """校验明细单独落一份 TSV（首行自动补表头），方便事后拿 WPS 只抽查可疑那一批。"""
-    if not _verify_path:
-        return
-    with _vrep_lock:
-        try:
-            need_head = not os.path.exists(_verify_path)
-            with open(_verify_path, "a", encoding="utf-8") as f:
-                if need_head:
-                    f.write("时间\t文件\t口径\t原件\t产物\t是否拦下\t说明\n")
-                f.write("\t".join(str(c) for c in cols).replace("\n", " ") + "\n")
-        except OSError as e:
-            print(f"警告：写校验报告失败：{e}", file=sys.stderr)
+def _vshort(lv: str, cd: str, nt: str) -> str:
+    """日志里那一小节：只回答能不能打开。能打开（连「可疑」也算）就一个字「正常」，
+       不报告警流水；真打不开才附一句短因（取告警里冒号后那半句，最多 60 字）。"""
+    if lv == _V_SKIP:
+        return "未校验"
+    if lv != _V_BAD:
+        return "正常"
+    why = nt.split("：", 1)[1] if "：" in nt else nt
+    return "打不开(%s)" % why.split("（")[0].strip()[:60]
 
 
 def verify_pair(fname: str, src: bytes, out: bytes, src_name: str) -> tuple:
-    """上传前双检：先测原件基线、再测产物。返回 (是否拦下, 逐文件短语, 是否全干净)。
+    """上传前双检：先测原件基线、再测产物。返回 (是否拦下, 日志列文本, 两边是否都能打开)。
 
     只有一种情况拦：产物判坏而原件不坏——那是我们改坏的，绝不上传。
     原件本来就坏（源件问题）照常上传并记 source_bad：这类连 refix 也修不好（膨胀只追加不改写），
@@ -1001,30 +1014,18 @@ def verify_pair(fname: str, src: bytes, out: bytes, src_name: str) -> tuple:
     lv_src, cd_src, nt_src = verify_pdf(src)
     lv_out, cd_out, nt_out = verify_pdf(out)
     blocked = (lv_out == _V_BAD and lv_src != _V_BAD) or (_verify_strict and lv_out == _V_SUSP)
-    clean = (lv_src == _V_OK and lv_out == _V_OK)
-    if blocked and lv_out == _V_BAD:
-        why, tag = (f"产物判坏（{cd_out}）而原件不坏（{cd_src}）：{nt_out}", "产物比原件坏，不上传：" + nt_out)
-    elif blocked:
-        why, tag = (f"严格口径拦下可疑产物（{cd_out}）：{nt_out}", "严格口径拦下可疑件：" + nt_out)
-    elif lv_src == _V_BAD:
-        why, tag = (f"原件本身就坏（{cd_src}），产物不背锅", "源件本身就坏，照传：" + nt_src)
-    elif lv_out == _V_SUSP:
-        why, tag = (f"可疑（{cd_out}），实测这类能打开，照传：{nt_out}", nt_out)
-    else:
-        why, tag = ("", nt_out)
+    note = f"源件{_vshort(lv_src, cd_src, nt_src)}/产物{_vshort(lv_out, cd_out, nt_out)}"
+    if blocked and lv_out != _V_BAD:
+        note += f"（可疑被严格口径拦回：{cd_out}）"
     with _lock:
         _stats["verify_checked"] += 1
-        if clean:
-            _stats["verify_ok"] += 1
-        if lv_out == _V_SUSP or lv_src == _V_SUSP:
-            _stats["verify_susp"] += 1
         if lv_src == _V_BAD:
             _stats["verify_source_bad"] += 1
+        if lv_out == _V_BAD:
+            _stats["verify_bad"] += 1
         if blocked:
             _stats["verify_block"] += 1
-    log_verify((log_ts(), fname, verify_desc(), f"{cd_src} {nt_src}", f"{cd_out} {nt_out}",
-                "是" if blocked else "否", tag))
-    return blocked, why, clean
+    return blocked, note, not (lv_src == _V_BAD or lv_out == _V_BAD)
 
 
 # ---------------- 单文件处理（含并发安全的分类与认领） ----------------
@@ -1035,7 +1036,7 @@ _stats = {
     "skip_done": 0, "skip_big": 0, "skip_notpdf": 0, "claim_fail": 0,
     "skip_notrefix": 0,
     "plan_new": 0, "plan_repair": 0, "plan_refix": 0,
-    "verify_checked": 0, "verify_ok": 0, "verify_susp": 0,
+    "verify_checked": 0, "verify_bad": 0,
     "verify_source_bad": 0, "verify_block": 0,
     "t_dl": 0.0, "t_inf": 0.0, "t_pu_s": 0.0, "t_pu_l": 0.0, "t_ver": 0.0,
     "bytes_dl": 0, "bytes_up": 0, "bytes_added": 0,
@@ -1066,7 +1067,7 @@ def handled_count() -> int:
 
 _LOG_PATH = None  # 本地处理流水日志路径（仅 apply 时写；由 --log / CONFIG 设定）
 
-# 本次运行的统一时间戳（流水日志与校验明细共用一个，两份日志能配对；行内另有一个逐条时间）。
+# 本次运行的统一时间戳（只有一份日志，拿它插上文件名；行内另有一个逐条时间）。
 # 导入时就固定，所以同一轮里多个写入点不会得到不同后缀。
 _RUN_STAMP = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
@@ -1230,8 +1231,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             blocked, vnote, vclean = verify_pair(fname, data, inflated, src_name)
             t_ver = time.time() - t
             if blocked:
-                log(f"[{idx}/{total}] {mk_fail} {fname}：{verb}产物未通过上传前校验，不覆盖 "
-                    f"{fname}（{vnote}）")
+                log(f"[{idx}/{total}] {mk_fail} {fname}：{verb}产物不过校验，不覆盖 {fname}（{vnote}）")
                 return
             prog = Progress(f"{fname} 覆盖", len(inflated), quiet, cols, _lock)
             t = time.time()
@@ -1251,7 +1251,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
                      f"<- {src_name}(原件副本) + {fname}(膨胀覆盖)\t"
                      f"{human_size(len(data))}->{human_size(len(inflated))}\t"
                      f"取副本 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
-                     f"覆盖 {human_secs(t_pu)}" + ("" if vclean else f"\t校验：{vnote}"))
+                     f"覆盖 {human_secs(t_pu)}\t校验：{vnote}")
             log_done(entry)
             log(f"[{idx}/{total}] {mk_ok} {fname}：{verb}覆盖 {human_size(len(data))}→"
                 f"{human_size(len(inflated))} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
@@ -1283,7 +1283,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         blocked, vnote, vclean = verify_pair(fname, data, inflated, sname)
         t_ver = time.time() - t
         if blocked:
-            log(f"[{idx}/{total}] {mk_fail} {fname}：膨胀产物未通过上传前校验，不上传（{vnote}）")
+            log(f"[{idx}/{total}] {mk_fail} {fname}：膨胀产物不过校验，不上传（{vnote}）")
             return
 
         # 原子认领：条件创建 X_sssss.pdf（只有成功者才允许覆盖 X.pdf）
@@ -1317,8 +1317,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         entry = (f"PROCESSED\t{fname}\t-> {sname}(原件副本) + {fname}(膨胀版)\t"
                  f"{human_size(len(data))}->{human_size(len(inflated))}\t"
                  f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
-                 f"传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}"
-                 + ("" if vclean else f"\t校验：{vnote}"))
+                 f"传副本 {human_secs(t_pu_s)} 传扩大 {human_secs(t_pu_l)}\t校验：{vnote}")
         log_done(entry)
         log(f"[{idx}/{total}] {mk_ok} {fname}：{human_size(size)}→{human_size(len(inflated))} "
             f"下载 {human_secs(t_dl)} 膨胀 {human_secs(t_inf)} 校验 {human_secs(t_ver)} "
@@ -1710,13 +1709,12 @@ def print_summary(apply: bool, secs: float):
               f"上传前校验 {human_secs(s['t_ver'])}，"
               f"传原件(_sssss) {human_secs(s['t_pu_s'])}，传扩大 {human_secs(s['t_pu_l'])}")
         if _verify_mode != "off":
-            print(f"上传前校验：查了 {s['verify_checked']} 组，全干净 {s['verify_ok']}，"
-                  f"可疑（只记录）{s['verify_susp']}，原件本身就坏（照传，不背锅）{s['verify_source_bad']}，"
-                  f"拦下未上传 {s['verify_block']}")
+            print(f"上传前校验：查了 {s['verify_checked']} 组；源件打不开 {s['verify_source_bad']}，"
+                  f"产物打不开 {s['verify_bad']}，拦下未上传 {s['verify_block']}，其余都能打开")
             if s["verify_block"]:
                 print(f"注意：{s['verify_block']} 个产物没上传（桶里仍是原样，也没建 _sssss，重跑会重试）——"
                       f"默认口径下拦的都是「产物比原件坏」（膨胀环节的问题），--verify-strict 还会多拦一批可疑件；"
-                      f"具体看校验报告那几行的「是否拦下」")
+                      f"逐个文件看流水日志每行最后那列「校验：源件…/产物…」")
         print(f"数据量：下载 {human_size(s['bytes_dl'])}，上传 {human_size(s['bytes_up'])}"
               f"（其中新增填充 {human_size(s['bytes_added'])}）")
         ndone = s["processed"] + s["repaired"] + s["refix"]
@@ -1760,12 +1758,11 @@ def main():
     parser.add_argument("--secret-key", default=None,
                         help="Secret Key；不传则用环境变量 MINIO_SECRET_KEY 或 CONFIG['MINIO_SECRET_KEY']")
     parser.add_argument("--log", default=None, nargs="?", const="",
-                        help=f"本地处理流水日志（相对路径按脚本目录解析）；"
-                             f"不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}）；"
+                        help=f"本地处理流水日志（相对路径按脚本目录解析；每行最后一列就是校验结论，"
+                             f"日志只有这一份）；不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}）；"
                              f"只写参数不带值=不写日志")
     parser.add_argument("--log-ts", default=None, choices=("on", "off"),
-                        help=f"日志文件名插上本次运行时间戳（每轮一份新文件，流水日志与校验明细同一"
-                             f"个时间戳）；off=沿用固定文件名逐轮追加；"
+                        help=f"日志文件名插上本次运行时间戳（每轮一份新文件）；off=沿用固定文件名逐轮追加；"
                              f"不传则用 CONFIG['LOG_TS']（当前：{CONFIG['LOG_TS']}）")
     parser.add_argument("--verify", default=None, choices=("auto", "tail", "off"),
                         help=f"上传前在内存里校验产物能不能被阅读器打开，判坏的不上传；"
@@ -1775,10 +1772,6 @@ def main():
     parser.add_argument("--verify-strict", action="store_true",
                         help="严格口径：连「可疑」（书签树/回退字体这类实测仍能打开的琐碎告警）"
                              "也拦下不上传；默认只拦 startxref/trailer 定位失败那一类")
-    parser.add_argument("--verify-report", default=None, nargs="?", const="",
-                        help=f"校验明细 TSV（相对路径按脚本目录解析，每行记：口径/原件结论/产物结论/"
-                             f"是否拦下）；不传则用 CONFIG['VERIFY_LOG']（当前：{CONFIG['VERIFY_LOG']}）；"
-                             f"只写参数不带值=不写")
     parser.add_argument("-n", "--limit", type=int, default=None,
                         help="本轮处理上限（只计本轮真要动的文件）；全目录模式默认 10，"
                              "定向名单模式默认=名单全做；0=不限")
@@ -1853,23 +1846,18 @@ def main():
         parser.error(f"--verify 只认 auto/tail/off（当前：{vmode}）")
     vstrict = bool(args.verify_strict) or str(_pick("VERIFY_STRICT", None, env_name="PDF_VERIFY_STRICT")).lower() \
         in ("1", "true", "yes", "on")
-    raw_vrep = str(CONFIG.get("VERIFY_LOG") or "") if args.verify_report is None else args.verify_report
-    raw_vrep = ts_filename(raw_vrep, log_ts_on)
-    vrep_path = "" if not raw_vrep else (
-        raw_vrep if os.path.isabs(raw_vrep) else os.path.join(_SCRIPT_DIR, raw_vrep))
-    set_verify(vmode, vstrict, vrep_path)
+    set_verify(vmode, vstrict)
 
     cols = shutil.get_terminal_size((100, 24)).columns
     mk_ok, mk_fail = make_marks()
     dry_note = "" if args.apply else "（干跑：不会改动桶内容，加 --apply 才执行）"
-    log_note = (f"日志={os.path.abspath(log_path)}" + ("（本轮新文件）" if log_ts_on else "（固定名追加）")) \
+    log_note = (f"日志={os.path.abspath(log_path)}" + ("（本轮新文件，含校验列）" if log_ts_on else "（固定名追加）")) \
         if log_path else "日志=关闭"
     if vmode == "off":
         verify_note = "上传前校验：已关（--verify off）"
     else:
-        verify_note = (f"上传前校验：{verify_desc()}，"
-                       + (f"明细={os.path.abspath(vrep_path)}" if vrep_path else "明细=不写")
-                       + ("；严格：可疑也拦" if vstrict else "；只拦「产物比原件坏」那批，可疑只记录"))
+        verify_note = (f"上传前校验：{verify_desc()}；结论就在日志每行最后一列，"
+                       + ("严格：可疑也拦" if vstrict else "只拦「产物比原件坏」那批"))
     t_scan = time.time()
 
     if wanted:
