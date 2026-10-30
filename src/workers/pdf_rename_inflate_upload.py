@@ -104,6 +104,10 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
     另外：并行 HEAD 谁先回就先投，所以流水线里的处理顺序只是「大致按名称序」，不再严格
     等于字典序（对结果没影响：每个文件独立且幂等）；只有 -n 截断时“具体做到哪几个”
     可能与旧行为差一两行，要完全可复现的顺序就加 --scan-first。
+  - 后台跑（nohup / 输出重定向到文件 / systemd）自动切「整行心跳」：进度条那套 \r 原地刷新
+    在文件里只会堆成一条乱码长行，所以检测到 stdout 不是终端就自动按 -q 的样子输出——
+    列目录、预筛、扫描每 5s 打一行「已发现 N / 已探测 N / 待处理 N / 已处理完 N」，
+    逐文件结果行照旧，tail -f 能看到数字在涨（PDF_HEARTBEAT 可改间隔秒数）。
   - 单进程多线程：-w/--workers 指定并发线程数（默认取 CONFIG['WORKERS']）。下载/上传是网络
     I/O 瓶颈，多线程可明显提快；线程共用同一签名客户端，统计/日志/输出均加锁。建议 -w 4~8，
     过大容易撞服务端限流(429)，脚本会自动退避重试。
@@ -549,7 +553,7 @@ def list_pdfs(endpoint: str, ak: str, sk: str, prefix: str, quiet: bool = False,
     if not quiet:
         print(f"正在列目录：{prefix} …（大目录可能较慢，已限制最多扫 {max_pdf or '不限'} 个）", flush=True)
     else:
-        log(f"列目录中：{prefix} …（对象多要翻很多页；静默模式下每 {int(_HEARTBEAT)}s 报一行，"
+        log(f"列目录中：{prefix} …（对象多要翻很多页；每 {int(_HEARTBEAT)}s 报一行进度，"
             "没输出不等于卡住）")
     pathname = strict_encode_path(f"/{bucket}")
     keys, token, offset, full = [], None, 0, False
@@ -1886,8 +1890,16 @@ def main():
                              "默认的 --refix 会顺带把还没处理过的新文件首次处理掉，"
                              "不想扩大范围就加它（也可单用，等于只做补做/修复）")
     parser.add_argument("--apply", action="store_true", help="真正执行下载/膨胀/上传（会改动桶）；缺省为干跑")
-    parser.add_argument("-q", "--quiet", action="store_true", help="静默：不显示进度条")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="静默：不出进度条，改成每几秒一行带计数的进度"
+                             "（nohup/重定向到文件时自动生效，不必手写）")
     args = parser.parse_args()
+
+    # 输出不是终端（nohup / 重定向到文件 / systemd）时，\r 原地刷新的进度条只会把文件写成一条
+    # 越来越长的乱码行、看起来像卡死；这种情况自动按 -q 的「整行心跳」方式跑：逐文件结果行照旧，
+    # 列目录/预筛/扫描每 5s 打一行带计数的进度，tail -f 就能看出它还在动。
+    if not sys.stdout.isatty():
+        args.quiet = True
 
     prefix = resolve_prefix(args)
     endpoint, ak, sk = resolve_endpoint_ak_sk(args)
