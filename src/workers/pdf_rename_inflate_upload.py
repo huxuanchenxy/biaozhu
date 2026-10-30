@@ -18,6 +18,7 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 
 膨胀规则（按原始大小，单位 MiB；档位内带随机小数，不再整齐落在 8M/9M/10M）：
   < 1M → 8.1~8.9M    1M~2M → 9.1~9.9M    2M~5M → 10.1~10.9M    > 5M → 规则外，跳过不动
+  （最后那条上限可用 --max-mb 调大，给“拿点名的超尺寸文件单独验证”用；全目录跑时别动）
 
 上传前校验（默认开，--verify off 可关）：
   覆盖上传前先在内存里问一次「这份字节阅读器能不能打开」，判坏的不上传。
@@ -62,6 +63,9 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   python pdf_rename_inflate_upload.py -n 5 --apply --log my.log       # 自取名 → my_20261029145550.log（仍插时间戳）
   python pdf_rename_inflate_upload.py -n 5 --apply --log ""           # 不写流水日志（Linux；Windows PowerShell 会把
   python pdf_rename_inflate_upload.py -n 5 --apply --log              #   空串参数吞掉，只写开关不带值就是同一个意思）
+  #   日志内容：正文每个成功文件一行 TSV（最后一列是校验结论「源件…/产物…」）；失败/被拦下的
+  #   文件也落一行（状态列 FAILED / BLOCKED，拿这份日志当 --files-from 名单就能定点重试）；
+  #   末尾整段追加本轮汇总页，每行以 # 开头（当名单读时会被当注释跳过）。
 
   # Linux（拷到 /opt/tools 后）：
   chmod +x pdf_rename_inflate_upload.py
@@ -80,7 +84,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   - 全程在内存处理，不把 PDF 下载到本地磁盘（无残留、不占空间）；仅在本地写 .log 流水日志，
     默认每轮一份新文件（文件名插本次运行时间戳），因为这份日志同时是 --files-from 的名单来源，
     几轮追加进同一份会越滚越大、也分不清哪批是哪一轮做的；--log-ts off 可退回固定名追加。
-  - 防重复处理：X_sssss.pdf 存在=已完成则跳过；膨胀版 >5M 不会被再次膨胀；产物 _sssss 不作为源。
+  - 防重复处理：X_sssss.pdf 存在=已完成则跳过；膨胀版（已达原件尺寸上限）不会被再次膨胀；
+    产物 _sssss 不作为源。
     （对同一目录重复跑只会处理“还没做过”的文件；随机档位仅落在新文件上，不动已完成的产品。）
     例外：显式 --refix 才重做已完成文件（拿 sidecar 里的原件重新膨胀覆盖 X.pdf，sidecar 本身不动）。
     注意 --refix 的预筛口径是 new/repair/refix 三类，会顺带把还没处理过的新文件也首次处理掉；
@@ -109,7 +114,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
       · 网络/5xx/429 自动重试 + 指数退避；412/404 不重试；时钟偏差自动校正重签。
       · 崩溃自愈：X_ssssss 已存在但 X.pdf 仍小（上次败在覆盖前）→ 从 _sssss 取原件补做覆盖(repair)。
   - 服务端若不支持条件写会自动回退为普通写（此时强烈建议配合 --shard 分片保证不重叠）。
-  - 每文件分四步计时，结尾输出总数、各步骤累计耗时、数据量与整体用时。
+  - 每文件分四步计时，结尾输出总数、各步骤累计耗时、数据量与整体用时；这段汇总会原样
+    追加到日志末尾（窗口关了/机器换了也能查到这一轮干了多少）。
   - 上传前校验（默认开）：判据与双检策略见上面「上传前校验」一节。日志只有一份：校验结论不单独
     落文件，就接在流水日志每行最后那一列，只说两件事——源件（_sssss 原件）正常/打不开、膨胀过的
     文件正常/打不开（能打开就算正常，不写告警流水）；只有打不开才附一句短因。
@@ -198,6 +204,10 @@ CONFIG = {
     #   "tail"：强制只用零依赖判定（想保住本文件的零依赖跑法时用）；"off"：完全不校验
     "VERIFY": "auto",
     "VERIFY_STRICT": False,        # True：连「可疑」（书签树/回退字体一类琐碎告警）也拦下不上传
+    # ---- 原件最大可处理尺寸（MiB）：超过它且没有 _sssss 备份的一律规则外跳过 ----
+    #   只为「拿点名的超尺寸文件单独验证」才调大（--max-mb）；放宽后已膨胀的完成版
+    #   会被当原件再膨一次，别在全目录模式下动它。
+    "MAX_MB": 5,
     # ---- 默认并发线程数 / 单请求重试次数 / 单请求超时（秒）----
     "WORKERS": 4,
     "RETRIES": 4,
@@ -205,7 +215,7 @@ CONFIG = {
 }
 # 覆盖优先级：命令行参数 > 环境变量 > 上面的 CONFIG > 项目 .env（仓库内临时换参数用）。
 #   环境变量名：MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / PDF_PREFIX / PDF_FILES
-#               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_LOG_TS
+#               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_LOG_TS / PDF_MAX_MB
 # 本文件自带连接信息，单独拷到 Linux 机器上就能跑，同级目录不需要任何配置文件。
 
 REGION = CONFIG["AWS_REGION"]
@@ -213,7 +223,20 @@ SERVICE = CONFIG["AWS_SERVICE"]
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _TIMEOUT = int(CONFIG["TIMEOUT"])
 _MIB = 1024 * 1024
-_BIG = 5 * _MIB          # 分界：可处理原件 <5M，膨胀完成版至少 ~8M；>5M 且无 _sssss 视为规则外/已完成
+_BIG = 5 * _MIB          # 分界：可处理原件 <5M，膨胀完成版至少 ~8M；超过且无 _sssss 视为规则外/已完成
+
+
+def set_big_limit(mib) -> None:
+    """调大「原件最大可处理尺寸」（默认 5MiB，--max-mb / PDF_MAX_MB）。
+       只为拿点名的超尺寸文件做单独验证；全目录模式下放宽会让已膨胀的完成版
+       被当成原件再膨一次，别随便调。非法值/≤ 0 一律忽略，保持原值。"""
+    global _BIG
+    try:
+        v = float(mib)
+    except (TypeError, ValueError):
+        return
+    if v > 0:
+        _BIG = int(round(v * _MIB))
 
 
 # ---------------- 配置读取（CONFIG / 环境变量 / .env 兼容） ----------------
@@ -769,7 +792,7 @@ class Minio:
 
 # ---------------- 膨胀规则与实现 ----------------
 
-# 目标档位（原始大小 → 目标整数部分 MiB）：<1M→8、1M~2M→9、2M~5M→10、>5M 不处理。
+# 目标档位（原始大小 → 目标整数部分 MiB）：<1M→8、1M~2M→9、2M~上限→10、超过上限不处理。
 # 目标在整数部分之上叠随机小数(_JITTER)，让产物不再是清一色的 8M/9M/10M，
 # 而是 8点几 / 9点几 / 10点几。
 _JITTER_LO, _JITTER_HI = 0.1, 0.9   # 随机小数范围（MiB）
@@ -781,13 +804,16 @@ def _band_target(base_mib: int) -> int:
 
 
 def target_for(size: int):
-    """按原始大小返回目标膨胀大小（字节，档位内随机）；>5M 不在规则内返回 None。"""
+    """按原始大小返回目标膨胀大小（字节，档位内随机）；超过 _BIG（默认 5M）返回 None。
+
+    上限被 --max-mb 放宽后，大原件取「最大档 10.x」与「原件 + 1.xMiB」里更大的那个：
+    既保证产物一定比原件大（否则填充块为空，白跑一轮），又不会一次胀出几十 MB。"""
     if size < 1 * _MIB:
         return _band_target(8)
     if size < 2 * _MIB:
         return _band_target(9)
-    if size <= 5 * _MIB:
-        return _band_target(10)
+    if size <= _BIG:
+        return max(_band_target(10), size + _band_target(1))
     return None
 
 
@@ -1108,6 +1134,21 @@ def log_done(entry: str):
             print(f"警告：写日志失败：{e}", file=sys.stderr)
 
 
+def log_failed(fname: str, why, status: str = "FAILED") -> None:
+    """失败 / 被拦下的文件也落一行（状态列不是 PROCESSED 之类）：拿这份日志当名单（--files-from）
+       就能定点重试这批。字段顺序与成功行同形，解析名单时取到的仍是文件名。"""
+    if not _LOG_PATH:
+        return
+    msg = " ".join(str(why).split())[:200]
+    line = f"{log_ts()}\t{status}\t{fname}\t-\t-\t{msg}"
+    with _lock:
+        try:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as e:
+            print(f"警告：写日志失败：{e}", file=sys.stderr)
+
+
 def make_marks():
     """✓/✗ 在部分控制台编码下可能编不出，探测后必要时降级为 [OK]/[X]。"""
     try:
@@ -1145,7 +1186,7 @@ def _classify(client: Minio, key: str, skey: str, refix: bool = False,
         if client.exists(alt):
             return ("refix" if (refix and refix_legacy) else "done"), size, alt
     if refix_only:
-        # 没备份：<5M 的归 notrefix（本轮不碰）；已 >5M 的仍报 big（语义是无原件可重做）
+        # 没备份：小于上限的归 notrefix（本轮不碰）；已达上限的仍报 big（语义是无原件可重做）
         return ("notrefix" if size < _BIG else "big"), size, None
     return ("big" if size >= _BIG else "new"), size, None
 
@@ -1179,7 +1220,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             return
         if kind == "big":
             bump("skip_big")
-            log(f"[{idx}/{total}] – {fname}：原始 {human_size(size)} > 5M 且无任何产物 sidecar，规则外跳过")
+            log(f"[{idx}/{total}] – {fname}：原始 {human_size(size)} 超过 {human_size(_BIG)} 且无任何产物 sidecar，规则外跳过")
             return
 
         # 干跑：只报告计划，不下载/不写（不落盘，本地不留任何 PDF）
@@ -1232,6 +1273,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             t_ver = time.time() - t
             if blocked:
                 log(f"[{idx}/{total}] {mk_fail} {fname}：{verb}产物不过校验，不覆盖 {fname}（{vnote}）")
+                log_failed(fname, f"{verb}产物不过校验：{vnote}", status="BLOCKED")
                 return
             prog = Progress(f"{fname} 覆盖", len(inflated), quiet, cols, _lock)
             t = time.time()
@@ -1271,7 +1313,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         target = target_for(len(data))
         if target is None:
             bump("skip_big")
-            log(f"[{idx}/{total}] – {fname}：下载后 {human_size(len(data))} > 5M，规则外跳过")
+            log(f"[{idx}/{total}] – {fname}：下载后 {human_size(len(data))} 超过 {human_size(_BIG)}，规则外跳过")
             return
 
         t = time.time()
@@ -1284,6 +1326,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         t_ver = time.time() - t
         if blocked:
             log(f"[{idx}/{total}] {mk_fail} {fname}：膨胀产物不过校验，不上传（{vnote}）")
+            log_failed(fname, f"膨胀产物不过校验：{vnote}", status="BLOCKED")
             return
 
         # 原子认领：条件创建 X_sssss.pdf（只有成功者才允许覆盖 X.pdf）
@@ -1326,6 +1369,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
     except Exception as e:
         bump("fail")
         log(f"[{idx}/{total}] {mk_fail} {fname}：{e}")
+        log_failed(fname, e)
 
 
 # ---------------- 定向名单（CONFIG["FILES"] / --files）：只处理点名的这几个文件 ----------------
@@ -1485,8 +1529,8 @@ def lookup_stem(client: Minio, prefix: str, stem: str, refix_only: bool = False)
          有 _sssss 但 X.pdf 还是小的/不见了 → repair（上次败在覆盖前，补做覆盖）
          只有历史后缀 sidecar → refix，并显式指定从那个 sidecar 取原件
            （名单是人手写的，不存在「误把真实文档当旧 sidecar」的风险，所以不需 --refix-legacy）
-         只有 X.pdf 且 <5M → new（按新规则处理；refix_only=True 时不碰）
-         只有 X.pdf 且 >5M 又没备份 → 拒绝重做（手上没原件，重做只会把膨胀版再膨一次）"""
+         只有 X.pdf 且小于上限 → new（按新规则处理；refix_only=True 时不碰）
+         只有 X.pdf 且已超上限又没备份 → 拒绝重做（手上没原件，重做只会把膨胀版再膨一次）"""
     key = f"{prefix}/{stem}.pdf"
     skey = s_key_of(key)
     ok_t, size_t, err_t = head_probe(client, key)
@@ -1505,7 +1549,7 @@ def lookup_stem(client: Minio, prefix: str, stem: str, refix_only: bool = False)
         return None, (f"桶里既没有 {stem}.pdf，也没有 {stem}_sssss.pdf"
                       "（确认名字、目录前缀与读权限；对象名区分大小写）")
     if size_t >= _BIG:
-        return None, (f"{stem}.pdf 已 {human_size(size_t)}（>5M）且没有任何 _sssss 备份，"
+        return None, (f"{stem}.pdf 已 {human_size(size_t)}（超过 {human_size(_BIG)}）且没有任何 _sssss 备份，"
                       "手上没原件可取，重做只会二次膨胀，拒绝处理")
     if refix_only:
         return None, (f"{stem}.pdf（{human_size(size_t)}）没有任何 _sssss 备份，"
@@ -1553,6 +1597,7 @@ def classify_safe(client: Minio, key: str, refix: bool = False, refix_legacy: bo
     except Exception as e:
         bump("fail")
         log(f"– {os.path.basename(key)}：探测失败，跳过（{e}）")
+        log_failed(os.path.basename(key), f"探测失败：{e}")
         return "error", 0, None
 
 
@@ -1680,7 +1725,7 @@ def process_stream(client: Minio, keys: list, limit: int, workers: int, apply: b
         log("\n[中断] 已停止扫描；在途与已排队的文件已做完，以下为这部分统计：")
     tail = (f"／无备份不碰 {_stats['skip_notrefix']}" if _stats["skip_notrefix"] else "")
     log(f"  扫描结束：探测 {st['probed']}/{len(keys)}，投喂 {st['ran']} 个待处理"
-        f"（跳过：已完成 {_stats['skip_done']}／>5M {_stats['skip_big']}{tail}）")
+        f"（跳过：已完成 {_stats['skip_done']}／超尺寸 {_stats['skip_big']}{tail}）")
     return st["probed"], st["found"]
 
 
@@ -1697,37 +1742,66 @@ def shutdown_pool(pool, block: bool = False):
 
 # ---------------- 汇总 ----------------
 
+_SUMMARY_LOGGED = False
+
+
+def log_summary(lines) -> None:
+    """把汇总页原样追加进流水日志（每行加 # 前缀：日志被 --files-from 当名单复用时会被跳过，
+       不会把统计行读成文件名）。窗口一关就看不到的那些数字，这里留一份；每轮只写一次。"""
+    global _SUMMARY_LOGGED
+    if not _LOG_PATH or _SUMMARY_LOGGED:
+        return
+    _SUMMARY_LOGGED = True
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("\n")
+            f.write(f"# ===== {log_ts()} 本轮结束，下面是汇总（上面是逐文件 TSV）=====\n")
+            for ln in lines:
+                f.write("# " + " ".join(str(ln).split()) + "\n")
+            f.write("\n")
+    except OSError as e:
+        print(f"警告：写日志汇总失败：{e}", file=sys.stderr)
+
+
 def print_summary(apply: bool, secs: float):
     s = _stats
-    print(f"\n===== 统计【{'APPLY（已改动桶）' if apply else 'DRY-RUN（未改动桶，加 --apply 才执行）'}】=====")
+    out = []
+
+    def emit(line: str = ""):
+        print(line)
+        out.append(line)
+
+    print()
+    emit(f"===== 统计【{'APPLY（已改动桶）' if apply else 'DRY-RUN（未改动桶，加 --apply 才执行）'}】=====")
     if apply:
-        print(f"结果：处理 {s['processed']}，补做 {s['repaired']}，重做 {s['refix']}，失败 {s['fail']}，"
-              f"跳过 {s['skip_done'] + s['skip_big'] + s['skip_notpdf'] + s['claim_fail'] + s['skip_notrefix']}"
-              f"（已完成 {s['skip_done']}／他人认领 {s['claim_fail']}／>5M {s['skip_big']}"
-              f"／非PDF {s['skip_notpdf']}／无备份不碰 {s['skip_notrefix']}）")
-        print(f"各步骤累计耗时：下载 {human_secs(s['t_dl'])}，膨胀 {human_secs(s['t_inf'])}，"
-              f"上传前校验 {human_secs(s['t_ver'])}，"
-              f"传原件(_sssss) {human_secs(s['t_pu_s'])}，传扩大 {human_secs(s['t_pu_l'])}")
+        emit(f"结果：处理 {s['processed']}，补做 {s['repaired']}，重做 {s['refix']}，失败 {s['fail']}，"
+             f"跳过 {s['skip_done'] + s['skip_big'] + s['skip_notpdf'] + s['claim_fail'] + s['skip_notrefix']}"
+             f"（已完成 {s['skip_done']}／他人认领 {s['claim_fail']}／超尺寸 {s['skip_big']}"
+             f"／非PDF {s['skip_notpdf']}／无备份不碰 {s['skip_notrefix']}）")
+        emit(f"各步骤累计耗时：下载 {human_secs(s['t_dl'])}，膨胀 {human_secs(s['t_inf'])}，"
+             f"上传前校验 {human_secs(s['t_ver'])}，"
+             f"传原件(_sssss) {human_secs(s['t_pu_s'])}，传扩大 {human_secs(s['t_pu_l'])}")
         if _verify_mode != "off":
-            print(f"上传前校验：查了 {s['verify_checked']} 组；源件打不开 {s['verify_source_bad']}，"
-                  f"产物打不开 {s['verify_bad']}，拦下未上传 {s['verify_block']}，其余都能打开")
+            emit(f"上传前校验：查了 {s['verify_checked']} 组；源件打不开 {s['verify_source_bad']}，"
+                 f"产物打不开 {s['verify_bad']}，拦下未上传 {s['verify_block']}，其余都能打开")
             if s["verify_block"]:
-                print(f"注意：{s['verify_block']} 个产物没上传（桶里仍是原样，也没建 _sssss，重跑会重试）——"
-                      f"默认口径下拦的都是「产物比原件坏」（膨胀环节的问题），--verify-strict 还会多拦一批可疑件；"
-                      f"逐个文件看流水日志每行最后那列「校验：源件…/产物…」")
-        print(f"数据量：下载 {human_size(s['bytes_dl'])}，上传 {human_size(s['bytes_up'])}"
-              f"（其中新增填充 {human_size(s['bytes_added'])}）")
+                emit(f"注意：{s['verify_block']} 个产物没上传（桶里仍是原样，也没建 _sssss，重跑会重试）——"
+                     f"默认口径下拦的都是「产物比原件坏」（膨胀环节的问题），--verify-strict 还会多拦一批可疑件；"
+                     f"逐个文件看流水日志每行最后那列「校验：源件…/产物…」")
+        emit(f"数据量：下载 {human_size(s['bytes_dl'])}，上传 {human_size(s['bytes_up'])}"
+             f"（其中新增填充 {human_size(s['bytes_added'])}）")
         ndone = s["processed"] + s["repaired"] + s["refix"]
         tail = f"，平均 {human_secs(secs / ndone)}/个" if ndone else ""
-        print(f"总用时 {human_secs(secs)}{tail}")
+        emit(f"总用时 {human_secs(secs)}{tail}")
     else:
-        print(f"计划：新建 {s['plan_new']}，补做 {s['plan_repair']}，重做 {s['plan_refix']}，"
-              f"跳过 {s['skip_done'] + s['skip_big'] + s['skip_notrefix']}"
-              f"（已完成 {s['skip_done']}／>5M {s['skip_big']}／无备份不碰 {s['skip_notrefix']}），"
-              f"失败 {s['fail']}")
-        print("（干跑：未下载/膨胀/上传，无步骤耗时；确认无误后加 --apply 执行）")
+        emit(f"计划：新建 {s['plan_new']}，补做 {s['plan_repair']}，重做 {s['plan_refix']}，"
+             f"跳过 {s['skip_done'] + s['skip_big'] + s['skip_notrefix']}"
+             f"（已完成 {s['skip_done']}／超尺寸 {s['skip_big']}／无备份不碰 {s['skip_notrefix']}），"
+             f"失败 {s['fail']}")
+        emit("（干跑：未下载/膨胀/上传，无步骤耗时；确认无误后加 --apply 执行）")
         if _verify_mode != "off":
-            print("（干跑不下载，所以也没做上传前校验；--apply 时才会逐份校验产物能不能打开）")
+            emit("（干跑不下载，所以也没做上传前校验；--apply 时才会逐份校验产物能不能打开）")
+    log_summary(out)
 
 
 # ---------------- 入口 ----------------
@@ -1772,6 +1846,10 @@ def main():
     parser.add_argument("--verify-strict", action="store_true",
                         help="严格口径：连「可疑」（书签树/回退字体这类实测仍能打开的琐碎告警）"
                              "也拦下不上传；默认只拦 startxref/trailer 定位失败那一类")
+    parser.add_argument("--max-mb", type=float, default=None,
+                        help=f"原件最大可处理尺寸 MiB（超过且无 _sssss 备份=规则外跳过）；"
+                             f"不传则用 CONFIG['MAX_MB']（当前：{CONFIG['MAX_MB']}）。"
+                             f"只为单文件验证而调大：放宽后已膨胀的完成版会被当原件再膨一次")
     parser.add_argument("-n", "--limit", type=int, default=None,
                         help="本轮处理上限（只计本轮真要动的文件）；全目录模式默认 10，"
                              "定向名单模式默认=名单全做；0=不限")
@@ -1847,6 +1925,7 @@ def main():
     vstrict = bool(args.verify_strict) or str(_pick("VERIFY_STRICT", None, env_name="PDF_VERIFY_STRICT")).lower() \
         in ("1", "true", "yes", "on")
     set_verify(vmode, vstrict)
+    set_big_limit(_pick("MAX_MB", args.max_mb, env_name="PDF_MAX_MB"))
 
     cols = shutil.get_terminal_size((100, 24)).columns
     mk_ok, mk_fail = make_marks()
@@ -1858,6 +1937,9 @@ def main():
     else:
         verify_note = (f"上传前校验：{verify_desc()}；结论就在日志每行最后一列，"
                        + ("严格：可疑也拦" if vstrict else "只拦「产物比原件坏」那批"))
+    if _BIG != 5 * _MIB:
+        print(f"注意：原件尺寸上限已放宽到 {human_size(_BIG)}（--max-mb），"
+              f"已膨胀过的完成版也会被当原件再膨一次——只建议配名单点名单个文件做验证")
     t_scan = time.time()
 
     if wanted:
@@ -1946,7 +2028,7 @@ def main():
                 args.refix, args.refix_legacy, args.refix_only, args.scan_workers)
             if found == 0:
                 print(f"探测了 {probed} 个源文件：没有匹配的待处理项"
-                      f"（已完成跳过 {_stats['skip_done']}／>5M 跳过 {_stats['skip_big']}）")
+                      f"（已完成跳过 {_stats['skip_done']}／超尺寸跳过 {_stats['skip_big']}）")
             print_summary(args.apply, time.time() - t_all)
             if _stats["fail"]:
                 sys.exit(2)
@@ -1959,10 +2041,10 @@ def main():
                   if _stats["skip_notrefix"] else "")
         if not pending:
             print(f"没有需要处理的 PDF（共探测 {len(sources)} 个：已完成跳过 {_stats['skip_done']}"
-                  f"／>5M 跳过 {_stats['skip_big']}{notrix}／失败 {_stats['fail']}）")
+                  f"／超尺寸跳过 {_stats['skip_big']}{notrix}／失败 {_stats['fail']}）")
             return
         total = len(pending)
-        print(f"预筛完成：待处理 {total} 个（已完成跳过 {_stats['skip_done']}，>5M 跳过 {_stats['skip_big']}"
+        print(f"预筛完成：待处理 {total} 个（已完成跳过 {_stats['skip_done']}，超尺寸跳过 {_stats['skip_big']}"
               + (f"，无备份不碰 {_stats['skip_notrefix']}" if _stats["skip_notrefix"] else "") + "），"
               f"用时 {human_secs(time.time() - t_scan)}\n", flush=True)
 
