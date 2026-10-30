@@ -82,7 +82,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 并发与健壮性：
   - 默认干跑，不写桶；显式 --apply 才改动。
   - 全程在内存处理，不把 PDF 下载到本地磁盘（无残留、不占空间）；仅在本地写 .log 流水日志，
-    默认每轮一份新文件（文件名插本次运行时间戳），因为这份日志同时是 --files-from 的名单来源，
+    默认每轮一份新文件（文件名插「目录尾段 + 本次运行时间戳」，两个目录并行跑各写各的），
+    因为这份日志同时是 --files-from 的名单来源，
     几轮追加进同一份会越滚越大、也分不清哪批是哪一轮做的；--log-ts off 可退回固定名追加。
   - 防重复处理：X_sssss.pdf 存在=已完成则跳过；膨胀版（已达原件尺寸上限）不会被再次膨胀；
     产物 _sssss 不作为源。
@@ -199,7 +200,8 @@ CONFIG = {
     "AWS_SERVICE": "s3",
     # ---- 本地流水日志（相对本脚本目录；空字符串=禁用）----
     #   LOG_TS=True（默认）时实际写出的文件名会插上本次运行时间戳：
-    #     pdf_processed.log → pdf_processed_20261029145550.log   每轮一份新文件
+    #     pdf_processed.log → pdf_processed_5.1_通用材料基因数据_成品语料_20261029145550.log
+    #   目录尾段取自 --prefix 的最后两段，所以两个目录并行跑各写各的、不会打架
     #   这是本轮唯一的日志：上传前校验的结论就在每行最后一列，不再第二份文件。
     "LOG_FILE": "pdf_processed.log",
     "LOG_TS": True,               # False 或 --log-ts off = 沿用固定文件名、逐轮追加
@@ -313,6 +315,9 @@ def resolve_endpoint_ak_sk(args) -> tuple:
 def resolve_prefix(args) -> str:
     prefix = _pick("PREFIX", args.prefix, env_name="PDF_PREFIX",
                    dotenv_keys=("MINIO_PREFIX",))
+    # 手误带着开头的 / 时，拼出来的 key 会是 "//bucket/…"：全目录模式报「bucket 为空」，
+    # 名单模式则全部静默未命中，所以这里直接归一到不带前导斜杠的写法。
+    prefix = (prefix or "").strip().lstrip("/")
     if not prefix or "/" not in prefix:
         sys.exit(f"错误：目录前缀需为 <bucket>/<路径>，当前：{prefix!r}"
                  "（改本文件 CONFIG['PREFIX']，或 --prefix / 环境变量 PDF_PREFIX）")
@@ -1125,6 +1130,26 @@ def ts_filename(path: str, enabled: bool = True) -> str:
     return f"{root}_{_RUN_STAMP}{ext}"
 
 
+def log_slug(prefix: str, max_len: int = 40) -> str:
+    """目录前缀压成文件名里的一小段（去掉桶名、只留最后两段）：两个目录并行跑时日志互不覆盖。
+       非法字符换成下划线，过长截断；实在取不出东西就用 default。"""
+    parts = [p for p in prefix.split("/") if p]
+    tail = parts[-2:] if len(parts) >= 3 else parts[-1:]
+    slug = re.sub(r"[^\w.\-]+", "_", "_".join(tail)).strip("_")
+    return slug[:max_len] if slug else "default"
+
+
+def default_log_name(prefix: str) -> str:
+    """未显式传 --log 时的默认日志名：在扩展名前插上目录尾段，
+       pdf_processed.log → pdf_processed_5.1_通用材料基因数据_成品语料.log
+       CONFIG['LOG_FILE'] 换过名字也照样插；留空=不写日志。"""
+    base = str(CONFIG.get("LOG_FILE") or "")
+    if not base:
+        return ""
+    root, ext = os.path.splitext(base)
+    return f"{root}_{log_slug(prefix)}{ext or '.log'}"
+
+
 def log_done(entry: str):
     """把一次成功处理追加到本地日志（只写文本，不落 PDF；每行关闭前 flush，尽量适配并发追加）。"""
     if not _LOG_PATH:
@@ -1837,7 +1862,8 @@ def main():
                         help="Secret Key；不传则用环境变量 MINIO_SECRET_KEY 或 CONFIG['MINIO_SECRET_KEY']")
     parser.add_argument("--log", default=None, nargs="?", const="",
                         help=f"本地处理流水日志（相对路径按脚本目录解析；每行最后一列就是校验结论，"
-                             f"日志只有这一份）；不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}）；"
+                             f"日志只有这一份）；不传则用 CONFIG['LOG_FILE']（当前：{CONFIG['LOG_FILE']}），"
+                             f"文件名自动插上目录尾段与时间戳，两个目录并行跑不会打架；"
                              f"只写参数不带值=不写日志")
     parser.add_argument("--log-ts", default=None, choices=("on", "off"),
                         help=f"日志文件名插上本次运行时间戳（每轮一份新文件）；off=沿用固定文件名逐轮追加；"
@@ -1923,7 +1949,7 @@ def main():
     log_ts_on = ts_mode not in ("0", "false", "no", "off")
     # 日志路径：未显式传 --log 时用 CONFIG['LOG_FILE']；相对路径一律落在脚本同目录，
     # 便于 Linux 上 nohup/systemd 任意工作目录运行都能找到同一份流水日志。
-    raw_log = str(CONFIG.get("LOG_FILE") or "") if args.log is None else args.log
+    raw_log = default_log_name(prefix) if args.log is None else args.log
     raw_log = ts_filename(raw_log, log_ts_on)
     log_path = "" if not raw_log else (
         raw_log if os.path.isabs(raw_log) else os.path.join(_SCRIPT_DIR, raw_log))

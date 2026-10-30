@@ -122,7 +122,9 @@ powershell -c "Get-Content run_20261030.out -Tail 20 -Wait"
 tail -f run_20261030.out
 ```
 
-脚本自己还会写一份流水日志 `pdf_processed_<时间戳>.log`（**固定落在脚本所在目录**，与当前工作目录无关）：
+脚本自己还会写一份流水日志 `pdf_processed_<目录尾段>_<时间戳>.log`（**固定落在脚本所在目录**，与当前工作目录无关）。
+
+文件名里的“目录尾段”取自 `--prefix` 的最后两段（如 `5.1_通用材料基因数据_成品语料`），所以同一台机器上两个不同目录并行跑时，日志自动分开、不会打架。
 
 - 逐文件一行 TSV，最后一列是校验结论：`校验：源件正常/产物正常`、`打不开(短因)`
 - 失败/被拦下的行状态是 `FAILED` / `BLOCKED`，这份日志可直接当名单重跑
@@ -153,7 +155,32 @@ kill <pid>          # SIGTERM 强杀：不写汇总块
 
 ---
 
-## 6. 单文件验证 / 定点点名
+## 6. 两个目录同时跑（两个窗口）
+
+同一个脚本、两个 cmd 窗口，**只差 `--prefix`**，日志名会自动带上目录尾段，两份互不覆盖：
+
+```bat
+:: 窗口 1：自筹（用 CONFIG 里的默认前缀）
+cd /d G:\project\biaozhu\src\workers
+python pdf_rename_inflate_upload.py -n 0 -w 4 --apply
+:: 日志：pdf_processed_5.1_通用材料基因数据_成品语料_20261030xxxxxx.log
+
+:: 窗口 2：国拨（只多一个 --prefix）
+cd /d G:\project\biaozhu\src\workers
+python pdf_rename_inflate_upload.py --prefix "drivdernet_abc/国拨/5_工业标准基础数据/5.2_机械工程与制造/成品语料" -n 0 -w 4 --apply
+:: 日志：pdf_processed_5.2_机械工程与制造_成品语料_20261030xxxxxx.log
+```
+
+要点：
+
+- `-w 4` 而不是 8：两个进程合计保持 8 线程，总吞吐不变但更少撞 429；并行不会让总时间变短（瓶颈仍是上行带宽）
+- 两个目录不重叠，不需要 `--shard`
+- 前缀不要写开头的 `/`（写成 `/drivdernet_abc/…` 时脚本会自动去掉，但别依赖这个）
+- 想固定日志名就用 `--log 我的名字.log`，此时不会再插目录尾段
+
+---
+
+## 7. 单文件验证 / 定点点名
 
 名单模式：配了 `--files` 就不再扫全目录，只处理点名的文件（写成 `X.pdf` 或 `X_sssss.pdf` 都归一到同一份）。
 
@@ -179,7 +206,7 @@ python pdf_rename_inflate_upload.py --files-from refix_pending.txt -n 0 --apply
 
 ---
 
-## 7. 常用参数
+## 8. 常用参数
 
 | 参数 | 作用 |
 |---|---|
@@ -195,12 +222,12 @@ python pdf_rename_inflate_upload.py --files-from refix_pending.txt -n 0 --apply
 | `--verify-strict` | 连「可疑」也拦（书签树、需重建 xref 这类实测能打开的也拦） |
 | `--list-cap 5000` | 列目录只收这么多个就停（多机分片时各机须一致） |
 | `--shards N --shard i` | 多机分片，各机处理互不相交的子集 |
-| `--log` / `--log-ts off` | 只写参数不带值=不写日志 / 日志用固定文件名逐轮追加 |
+| `--log` / `--log-ts off` | 只写参数不带值=不写日志 / 日志用固定文件名逐轮追加；不传 `--log` 时默认名自动带「目录尾段+时间戳」 |
 | `-q` | 静默（输出重定向到文件时自动生效，不用手写） |
 
 ---
 
-## 8. 常见坑
+## 9. 常见坑
 
 | 现象 | 原因 / 处理 |
 |---|---|
@@ -208,6 +235,7 @@ python pdf_rename_inflate_upload.py --files-from refix_pending.txt -n 0 --apply
 | 单文件跑不动，报「拒绝处理」或「不像原件，跳过」 | 原件 ≥5MB，加 `--max-mb 12` |
 | Windows 上执行 `python3` 弹应用商店 | 用 `python` 或 `py -3` |
 | 控制台中文乱码 | `chcp 65001`（日志文件本身始终是 UTF-8） |
+| 前缀多写了开头的 `/` | 会自动去掉；但别写成 `//` 或多层斜杠 |
 | 后台跑看着没反应 | 前 10~60 秒在列目录（4 万个对象要翻几十页），每 5 秒会有一行心跳；没有输出才是异常 |
 | `kill` 后日志没有汇总块 | `kill`（SIGTERM）/`taskkill /f` 都是强杀；用 `kill -INT` 或 Ctrl+C |
 | 本机和服务器同时跑同一批 | 会各做一遍、重复上传，日志也混；只留一端 |
