@@ -6,8 +6,10 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 ★ 自包含单文件（Windows / Linux 通用）
   - 不 import 同目录的 pdf_download / pdf_inflate：所需的 SigV4 签名、列目录、进度条、合法
     尾部填充已全部内联进本文件，把这一个 .py 拷到 Linux 机器上就能直接跑，零第三方依赖。
-  - 桶连接信息与目标 PDF 目录写在下面的「配置区 CONFIG」里，脚本只靠本文件即可运行，
-    同级目录不需要任何配置文件；命令行参数与环境变量仍可临时覆盖（换桶/换目录而不改代码时用）。
+  - MinIO 地址不写死在文件里：必须用 --endpoint 或环境变量 MINIO_ENDPOINT 传入（两处都空则
+    启动即报错并给出用法）。同一份脚本拷到不同机器/不同桶，只换命令行参数即可，不用改代码。
+  - 目标 PDF 目录与 AK/SK 写在下面的「配置区 CONFIG」里，同级目录不需要任何配置文件，
+    命令行参数与环境变量可临时覆盖。
 
 流程（对成品语料目录下每个 PDF，记原件为 X.pdf）：
   1) 下载原件 X.pdf 到内存（不落盘：本地不写任何 PDF，避免占用磁盘）
@@ -40,7 +42,9 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   日志里不区分后面两档：只写「正常 / 打不开」——能开就算正常，只有致命档才写打不开。
 
 用法（Windows 用 python，Linux 用 python3 或 ./本文件）：
-  python pdf_rename_inflate_upload.py -n 10            # 干跑（默认）：只探测+算目标，不改动桶
+  # MinIO 地址必须先给出（脚本里不写死）：每条命令带 --endpoint，或先 export/set 环境变量：
+  export MINIO_ENDPOINT=http://10.0.0.1:9000        # Linux；Windows 用 set MINIO_ENDPOINT=...
+  python pdf_rename_inflate_upload.py -n 10 --endpoint http://10.0.0.1:9000   # 干跑（默认）：只探测+算目标，不改动桶
   python pdf_rename_inflate_upload.py -n 10 --apply    # 真正处理 10 个（只算还没处理的）
   python pdf_rename_inflate_upload.py -n 0 --apply     # 处理全部未处理（慎用）
   python pdf_rename_inflate_upload.py -n 200 -w 4 -q   # 4 线程并发处理 200 个（推荐：进度条不交错）
@@ -169,10 +173,13 @@ if sys.version_info < (3, 6):
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ==================== 配置区：Linux 上只靠这里就能跑（无需 .env） ====================
+# ==================== 配置区：AK/SK 与目标目录（无需 .env；MinIO 地址走 --endpoint） ====================
 CONFIG = {
     # ---- MinIO 连接（path-style 直连；endpoint 末尾不要带 /）----
-    "MINIO_ENDPOINT": "http://10.89.14.234:12001",
+    #   MINIO_ENDPOINT 故意留空、不写死：各机器的 MinIO 地址不同（本机/内网/跳板机），统一由
+    #   命令行 --endpoint 或环境变量 MINIO_ENDPOINT 传入；都不给时启动直接报错并提示用法。
+    #   例：--endpoint http://10.0.0.1:9000   /   export MINIO_ENDPOINT=http://10.0.0.1:9000
+    "MINIO_ENDPOINT": "",
     "MINIO_ACCESS_KEY": "NXKKBDFEZP9XNNHVRIHT",
     "MINIO_SECRET_KEY": "Fx0k0Ix2Pab4hkZMOvl3oLLKL08W5ZPVmBiTyJUS",
     # ---- 待处理目录前缀：<bucket>/<目录路径>（只列这一层下的 *.pdf）----
@@ -222,7 +229,8 @@ CONFIG = {
 # 覆盖优先级：命令行参数 > 环境变量 > 上面的 CONFIG > 项目 .env（仓库内临时换参数用）。
 #   环境变量名：MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / PDF_PREFIX / PDF_FILES
 #               / PDF_VERIFY / PDF_VERIFY_STRICT / PDF_LOG_TS / PDF_MAX_MB
-# 本文件自带连接信息，单独拷到 Linux 机器上就能跑，同级目录不需要任何配置文件。
+# 本文件自带 AK/SK 与目标目录，单独拷到 Linux 机器上、用 --endpoint 给出 MinIO 地址就能跑，
+# 同级目录不需要任何配置文件。
 
 REGION = CONFIG["AWS_REGION"]
 SERVICE = CONFIG["AWS_SERVICE"]
@@ -299,17 +307,46 @@ def _pick(name: str, cli_value=None, env_name=None, dotenv_keys=None) -> str:
     return ""
 
 
+# endpoint 的实际来源（命令行 / 环境变量 / .env），只用于启动横幅：避免「到底连的是哪台机器」靠猜
+_ENDPOINT_SRC = ""
+
+
+def _resolve_endpoint(cli_value) -> tuple:
+    """返回 (endpoint, 来源说明)。优先级：--endpoint > 环境变量 MINIO_ENDPOINT >
+    脚本目录/仓库根 .env 的 MINIO_ENDPOINT、VITE_MINIO_ENDPOINT。CONFIG 里故意不再保留地址。"""
+    if cli_value:
+        return str(cli_value).strip(), "命令行 --endpoint"
+    env = os.environ.get("MINIO_ENDPOINT")
+    if env:
+        return env.strip(), "环境变量 MINIO_ENDPOINT"
+    dot = _dotenv_values()
+    for k in ("MINIO_ENDPOINT", "VITE_MINIO_ENDPOINT"):
+        if dot.get(k):
+            return str(dot[k]).strip(), f".env 的 {k}"
+    return "", ""
+
+
 def resolve_endpoint_ak_sk(args) -> tuple:
-    """返回 (endpoint, ak, sk)；配置缺失时给出可操作报错。"""
-    endpoint = _pick("MINIO_ENDPOINT", args.endpoint)
+    """返回 (endpoint, ak, sk)；配置缺失时给出可操作报错。endpoint 不写死在本文件里，
+       只认命令行 --endpoint / 环境变量 MINIO_ENDPOINT / 项目 .env。"""
+    global _ENDPOINT_SRC
+    endpoint, _ENDPOINT_SRC = _resolve_endpoint(args.endpoint)
     ak = _pick("MINIO_ACCESS_KEY", args.access_key)
     sk = _pick("MINIO_SECRET_KEY", args.secret_key)
-    if not endpoint or not ak or not sk:
-        sys.exit("错误：MinIO 连接参数不完整。请在本文件 CONFIG 里填 MINIO_ENDPOINT / "
-                 "MINIO_ACCESS_KEY / MINIO_SECRET_KEY，或用命令行 --endpoint/--access-key/"
-                 f"--secret-key、环境变量传入（当前 endpoint={bool(endpoint)},"
-                 f"ak={bool(ak)},sk={bool(sk)}）")
-    return endpoint.rstrip("/"), ak, sk
+    if not endpoint:
+        sys.exit("错误：没有 MinIO 地址。脚本里不写死地址，请用命令行 --endpoint 传入，"
+                 "或设环境变量 MINIO_ENDPOINT\n"
+                 "  例：--endpoint http://10.0.0.1:9000\n"
+                 "  例：export MINIO_ENDPOINT=http://10.0.0.1:9000   "
+                 "（Windows：set MINIO_ENDPOINT=http://10.0.0.1:9000）")
+    if not ak or not sk:
+        sys.exit("错误：MinIO 凭据不完整。请在本文件 CONFIG 里填 MINIO_ACCESS_KEY / "
+                 "MINIO_SECRET_KEY，或用命令行 --access-key/--secret-key、环境变量传入"
+                 f"（当前 ak={bool(ak)},sk={bool(sk)}）")
+    endpoint = endpoint.rstrip("/")
+    if "://" not in endpoint:          # 只写了 host:port 时按内网惯例补 http://
+        endpoint = "http://" + endpoint
+    return endpoint, ak, sk
 
 
 def resolve_prefix(args) -> str:
@@ -1849,13 +1886,16 @@ def main():
     ensure_utf8_streams()          # 先切 UTF-8，再创建进度条/探测 ✓✗ 是否可用
     parser = argparse.ArgumentParser(
         description="MinIO 目录 PDF 批量：重命名(_sssss)+膨胀+回传原目录"
-                    "（连接与目录默认取本文件 CONFIG，默认干跑，--apply 才改动）",
+                    "（MinIO 地址用 --endpoint 传入，目录默认取本文件 CONFIG['PREFIX']；"
+                    "默认干跑，--apply 才改动）",
         formatter_class=_Formatter)
     parser.add_argument("--prefix", default=None,
                         help=f"目录前缀（<bucket>/<路径>）；不传则用 CONFIG['PREFIX']"
                              f"（当前：{CONFIG['PREFIX']}）")
     parser.add_argument("--endpoint", default=None,
-                        help=f"MinIO 地址；不传则用 CONFIG['MINIO_ENDPOINT']（当前：{CONFIG['MINIO_ENDPOINT']}）")
+                        help="MinIO 地址（如 http://10.0.0.1:9000，末尾不要带 /）；脚本里不写死，"
+                             "不传则取环境变量 MINIO_ENDPOINT，两者都没有则启动报错。"
+                             "只写 host:port 时自动补 http://")
     parser.add_argument("--access-key", default=None,
                         help="Access Key；不传则用环境变量 MINIO_ACCESS_KEY 或 CONFIG['MINIO_ACCESS_KEY']")
     parser.add_argument("--secret-key", default=None,
@@ -1989,7 +2029,7 @@ def main():
             print("提示：定向名单本身就含「重做」语义，无需 --refix（已忽略）")
         workers = max(1, min(workers_req, len(wanted)))
         print(f"模式：{'APPLY' if args.apply else 'DRY-RUN'}（定向名单 {len(wanted)} 个条目）{dry_note}")
-        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}）")
+        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}，地址来自{_ENDPOINT_SRC}）")
         print(f"目录：{prefix}")
         print("名单语义：X.pdf 与 X_sssss.pdf 算同一个文件；已膨胀过的从 _sssss 取原件按当前规则"
               "重新膨胀并覆盖 X.pdf（_sssss 不动），没处理过的正常处理")
@@ -2041,7 +2081,7 @@ def main():
         workers = max(1, min(workers_req, len(sources)))
         shard_note = f"（分片 {args.shard}/{args.shards}）" if args.shards > 1 else ""
         print(f"模式：{'APPLY' if args.apply else 'DRY-RUN'}{shard_note}{dry_note}")
-        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}）")
+        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}，地址来自{_ENDPOINT_SRC}）")
         print(f"目录：{prefix}")
         print(f"目录共 {len(sources)} 个源文件（已排除产物后缀），"
               + ("先并发预筛完再处理（--scan-first）" if args.scan_first
