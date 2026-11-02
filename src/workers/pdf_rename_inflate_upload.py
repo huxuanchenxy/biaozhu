@@ -13,7 +13,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 
 流程（对成品语料目录下每个 PDF，记原件为 X.pdf）：
   1) 下载原件 X.pdf 到内存（不落盘：本地不写任何 PDF，避免占用磁盘）
-  2) 本地按规则膨胀，生成变大后的字节（合法尾部填充 + 补一份 startxref/%%EOF 结尾，PDF 仍可正常打开）
+  2) 本地按规则膨胀，生成变大后的字节（合法尾部填充 + 补一份 startxref/%%EOF 结尾，PDF 仍可正常打开；
+     结尾写得不规整的件——KR 专利那类——认不出标准结尾时走宽松档，逐条验真后补尾）
   3) 上传原件为 X_sssss.pdf（“重命名”语义：原件以 _sssss 名字保留，不删不改数据）
   4) 上传膨胀版覆盖回 X.pdf（无 _sssss 的“扩大过后的文件”落在原目录原名下）
   5) 本地追加一份处理流水日志 .log（记录桶内已生成 X_sssss.pdf 的对象）
@@ -811,16 +812,22 @@ class Minio:
         if prog is not None:
             prog.update(len(data))
 
-    def put_conditional(self, key: str, data: bytes) -> bool:
+    def put_conditional(self, key: str, data: bytes, prog: Progress = None) -> bool:
         """条件写创建对象：不存在才成功。返回是否成功认领（True=我创建/已回退写入）。
-        412（已存在）返回 False。服务端不支持条件写时自动回退普通写并返回 True。"""
+        412（已存在）返回 False。服务端不支持条件写时自动回退普通写并返回 True。
+
+        prog：调用方为这一步建了进度条就必须报数，不报的话它会一直停在 0B/xxKB 0.0%——
+        传成功也显示 0%，看着像没传（2026-11-02 就是这个现象）。412 没真发过字节，所
+        以那条不报数，让它停在 0% 反而是对的。"""
         if self.no_cond:
-            self.put_bytes(key, data)
+            self.put_bytes(key, data, prog)
             return True
         try:
             resp = self._call("PUT", key, data=data, extra={"If-None-Match": "*"})
             resp.read()
             resp.close()
+            if prog is not None:
+                prog.update(len(data))
             return True
         except urllib.error.HTTPError as e:
             if e.code == 412:                 # 已存在：他人已认领/已处理
@@ -831,7 +838,7 @@ class Minio:
                 print("警告：MinIO 不支持条件写(If-None-Match)，已回退普通上传；"
                       "多机并发请配合 --shard/--shards 分片避免重叠", file=sys.stderr)
                 self.no_cond = True
-                self.put_bytes(key, data)
+                self.put_bytes(key, data, prog)
                 return True
             raise
 
@@ -867,6 +874,30 @@ def target_for(size: int):
 # 避免在二进制流里误命中“startxref”字样。
 _TAIL_XREF_RE = re.compile(rb"startxref\s+(\d{1,20})\s+%%EOF\s*\Z")
 
+# 宽松档（严格档认不出来时的第二次尝试）。上面那条要求 %%EOF 之后只剩空白，可 KR（韩国专利）
+# 那类生成器写结尾很随意：%%EOF 后拖垃圾字节、连写两遍 %%EOF、startxref 与 %%EOF 之间夹注释，
+# 一律认不出来 → 不补尾 → 纯追加几 MB 填充把真指针推出阅读器 1KB 回搜窗口 → 产物判坏。
+# 2026-11-02 实测：KR100290437B1.pdf 才 17.6KB，撑到 8.8MB 后指针距尾整整 8.8MB，报
+# “源件正常/产物打不开(cannot find startxref)”，本批 4983 个 BLOCKED 基本都卡在这条上。
+# 所以这里从尾部窗口的最后一条 startxref 往前逐条试（增量更新时最后那条才作数，但尾部拖了
+# 垃圾时最后那条可能是假的），每条都拿偏移去现场验真——全都不准则维持原样不补，
+# 绝不猜一个数字贴上去（错指针比没指针更糟）。
+_LOOSE_XREF_RE = re.compile(rb"startxref\s+(\d{1,20})(?!\d)")
+_LOOSE_XREF_WIN = 4096
+
+
+def _xref_target_ok(data: bytes, off: int) -> bool:
+    """验真：off 指过去得确实像一张 xref（表头 xref / N M obj 交叉引用流 / 含 /Type /XRef）。
+
+    宽松档只是放宽“怎么读数字”，没放宽“数字能不能信”：靠这一眼把二进制流里偶然
+    出现的 startxref 字样挡掉，避免把阅读器引到空白处。 """
+    seg = data[off:off + 32]
+    if seg.startswith(b"xref"):
+        return True
+    if re.match(rb"\d+\s+\d+\s+obj\b", seg):
+        return True
+    return re.search(rb"/Type\s*/XRef", data[off:off + 512]) is not None
+
 
 def _tail_startxref(data: bytes):
     """取原文件结尾的 startxref 偏移，返回可追加的结尾字节（如 b'startxref\\n12345\\n%%EOF\\n'）。
@@ -875,14 +906,24 @@ def _tail_startxref(data: bytes):
     只在尾巴上堆几 MB 注释、却没有新的 startxref 时，真正的 xref 被推到回搜窗口之外，
     部分阅读器就报“文件已损坏/须要修复”甚至直接打不开。填充后原样补一份 startxref+%%EOF
     （偏移不变，因为我们只追加不改写），文件结尾看上去就跟一次正常的增量更新一样。
-    结尾不规则（本身就坏/带附件）时返回 None，保持原来的纯追加行为，不会注入错误偏移。
+    结尾不规整时先走宽松档验真补尾；连宽松档也认不出（真没有 startxref／带附件）才返回
+    None，保持纯追加行为，不会注入错误偏移。
     """
     m = _TAIL_XREF_RE.search(data[-64:])
-    if not m:
-        return None
-    off = int(m.group(1))
-    if off <= 0 or off >= len(data):     # 偏移不合理：不补，避免把阅读器引到错位置
-        return None
+    if m:
+        off = int(m.group(1))
+        if off <= 0 or off >= len(data):     # 偏移不合理：不补，避免把阅读器引到错位置
+            return None
+    else:
+        off = 0
+        for cand in reversed(_LOOSE_XREF_RE.findall(data[-_LOOSE_XREF_WIN:])):
+            n = int(cand)
+            # 认得出数字还不够，得核对那位置真是 xref；假的就再往前退一条
+            if 0 < n < len(data) and _xref_target_ok(data, n):
+                off = n
+                break
+        if not off:
+            return None
     return b"startxref\n" + str(off).encode() + b"\n%%EOF\n"
 
 
@@ -1398,7 +1439,7 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         # 原子认领：条件创建 X_sssss.pdf（只有成功者才允许覆盖 X.pdf）
         prog = Progress(f"{fname} 传副本", len(data), quiet, cols, _lock)
         t = time.time()
-        claimed = client.put_conditional(skey, data)
+        claimed = client.put_conditional(skey, data, prog)
         t_pu_s = time.time() - t
         prog.close()
         if not claimed:
