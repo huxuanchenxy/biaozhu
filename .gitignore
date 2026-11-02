@@ -34,3 +34,4 @@ public/wasm
 /src/workers/_libtest/
 # Python 字节码缓存（脚本被 import 时自动生成，无用可删）
 __pycache__/
+/src/workers/log20261030c/*.out
