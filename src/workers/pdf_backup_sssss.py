@@ -44,13 +44,20 @@ Windows（PowerShell）干脆写成一长行，记得给目录加双引号（路
 
 说明：
   - 只读：全程不发 PUT/POST/DELETE；改桶请回去用 pdf_rename_inflate_upload.py。
+  - 膨胀版 X.pdf 默认不下：只往清单里记大小+ETag，当「成品没被动过」的凭据。
+    想连膨胀版本体一起存到本地就加 --with-inflated：它一个八到十一 MB，比原件大十几倍，
+    会和原件一起走同一道容量预检，预检不过直接中止（这种情形连 --yes 也不放行）。
   - 断点续传：先写 .part 再改名，中断不留半截文件；重跑时本地已存在且大小一致就跳过
     （只补算 sha256），--force 才重下。输出目录不带时间戳，就是为了能反复重跑接着备。
   - 清单 manifest.tsv（UTF-8，制表符分隔，和处理脚本日志同风格）：
       kind  key  size  etag  sha256  local  status
-    kind = COPY(_sssss 原件，已/待下载) | INFLATED(膨胀版，只记 size+etag 不下内容)。
-    status = 已下载 / 已存在跳过 / 待下载(未开始) / 失败:原因 / 清单(不下内容)。
+    kind = COPY(_sssss 原件) | INFLATED(膨胀版：默认只记 size+etag，--with-inflated 时真下载)。
+    status = 已下载 / 已存在跳过 / 待下载(未开始) / 失败:原因 / 清单(不下内容) / 补记(备份时缺)。
     用 --check 复跑会把本地文件的实测大小/哈希再填一遍，方便事后自证。
+  - 两份名单文件（同一目录，作用相反）：deletable_keys.txt = 逐条核过、可以删的；
+    pending_inflated_keys.txt = 同层还欠一个膨胀版、绝对不能删的（它们是重做膨胀版的
+    唯一凭据）。后者每行一个文件名、# 开头是注释，格式正好能喂给处理脚本的名单模式：
+        python pdf_rename_inflate_upload.py --prefix "<同一个目录>" --files-from pending_inflated_keys.txt
   - ETag 注意：单次 PUT 的 ETag 就是内容 MD5（我们自己的膨胀版就是这么传的），但分片
     上传的对象 ETag 形如 "xxxx-3"、不是 MD5。所以本脚本只把它当「变没变」的凭据，
     不当「内容对不对」的凭据 —— 内容凭据一律用本地 sha256。
@@ -850,8 +857,30 @@ def write_deletable(path, keys, suffixes, expect_total, note=""):
     return path
 
 
+def write_pending_inflated(path, keys, suffixes, note=""):
+    """待补名单：这些 _sssss 原件在同层找不到对应的膨胀版 X.pdf。它们不是「可删」而是
+       「还欠活」，所以要单独出一份文件交人工，不能混在删除流程里。只在终端打三行样本
+       不够：跑过就丢了，而这一批恰恰是要回头补做的活。
+       每行一个 basename、# 开头是注释，能直接喂给处理脚本的 --files-from（它认 X_sssss.pdf）."""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# 这些 %s 原件在同层找不到对应的膨胀版 X.pdf：上一轮处理没做完，"
+                "或者成品本来就放到子目录去了。\n" % "/".join(suffixes))
+        f.write("# 本地已经备份好，但它们绝对不能删 —— 是重做膨胀版的唯一凭据。\n")
+        f.write("# 要补做，把本文件直接喂给处理脚本（prefix 用同一个目录）：\n")
+        f.write("#   python pdf_rename_inflate_upload.py --prefix \"<同一个目录>\" "
+                "--files-from \"%s\"\n" % os.path.basename(path))
+        f.write("# 补做完再跑一次 --check：补上的行会从本文件消失，同时 "
+                "deletable_keys.txt 会多出一行。\n")
+        f.write("# 共 %d 行。\n" % len(keys))
+        if note:
+            f.write("# " + note + "\n")
+        for k in sorted(keys):
+            f.write(os.path.basename(k) + "\n")
+    return path
+
+
 def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
-             manifest_path, keys_path, args):
+             manifest_path, keys_path, pending_path, args):
     """--check：不重下，只按清单逐项复核，两个用途都靠它：
        删之前跑 = 确认「备份齐了、本地一个不坏」（回滚凭据）；
        删之后跑 = 确认「膨胀版从头到尾没被动过」（这当初就是只记 size+ETag 那份清单的意义）。
@@ -879,14 +908,20 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
 
     t0 = time.time()
     # ---- [1/3] 本地逐行实测：存在 + 大小 + sha256（不靠进进清单里那个旧结论）----
-    print("[1/3] 核对本地 %d 个备份件（存在 + 大小 + sha256）…" % len(copy_rows))
+    # 用 --with-inflated 真下过内容的那些膨胀版（r[4] 有 sha256 = 当时算过凭据）也顺手核
+    # 一遍。但它的坏结果不参与「能不能删」：删 _sssss 的凭据是原件，膨胀版本体还待在桶里
+    chk_rows = copy_rows + [r for r in infl_rows if r[4]]
+    print("[1/3] 核对本地 %d 个备份件（原件 %d + 膨胀版 %d，存在 + 大小 + sha256）…"
+          % (len(chk_rows), len(copy_rows), len(chk_rows) - len(copy_rows)))
     hb_reset()
     lock = threading.Lock()
-    missing, size_bad, hash_bad, unread = [], [], [], []
+    missing, size_bad, hash_bad, unread, infl_bad = [], [], [], [], []
     filled = [0]
     done_n = [0]
 
     def chk(r):
+        """返回一句问题描述（None = 通过），并把实测大小/路径/哈希回填进行里。
+           问题算原件的还是膨胀版的，由调用方按 r[0] 分流，免得两种东西挤一个计数。"""
         key, size = r[1], int(r[2] or 0)
         # 先按当前机器重算一遍路径：清单里存的是备份那台机器的绝对路径，
         # Linux 备的 Windows 核（或换了 --out 目录）时它必然不存在，不能就此判「本地缺失」
@@ -894,47 +929,53 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
                 r[5]]
         path = next((p for p in cand if p and os.path.exists(p)), "")
         if not path:
-            with lock:
-                missing.append(key)
-                r[6] = "失败:本地缺失"
-            return
+            r[6] = "失败:本地缺失"
+            return "缺"
         got = os.path.getsize(path)
         if got != size:
-            with lock:
-                size_bad.append(key)
-                r[6] = "失败:本地大小不符(%d≠%d)" % (got, size)
-            return
+            r[6] = "失败:本地大小不符(%d≠%d)" % (got, size)
+            return "大小"
         try:
             sha = sha256_file(path)
         except OSError as e:
-            with lock:
-                unread.append(key)
-                r[6] = "失败:本地不可读 %s" % str(e)[:60]
-            return
+            r[6] = "失败:本地不可读 %s" % str(e)[:60]
+            return "不可读"
         if r[4] and r[4] != sha:
+            r[6] = "失败:sha256不符(本地内容与备份那轮不一致!)"
+            return "哈希"
+        if not r[4]:                     # 备份时没算成（被中断/当时跳过了），现在补上凭据
+            r[4] = sha
             with lock:
-                hash_bad.append(key)
-                r[6] = "失败:sha256不符(本地内容与备份那轮不一致!)"
-            return
-        with lock:
-            if not r[4]:                     # 备份时没算成（被中断/当时跳过了），现在补上凭据
-                r[4] = sha
                 filled[0] += 1
-            r[5] = path
-            r[6] = "本地已核验"
+        r[5] = path
+        r[6] = "本地已核验"
+        return None
 
+    buckets = {"缺": missing, "大小": size_bad, "哈希": hash_bad, "不可读": unread}
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-        futs = [ex.submit(chk, r) for r in copy_rows]
-        for fu in as_completed(futs):
-            fu.result()
+        fut_map = {ex.submit(chk, r): r for r in chk_rows}
+        for fu in as_completed(fut_map):
+            r = fut_map[fu]
+            why = fu.result()
+            if why:
+                if r[0] == "COPY":
+                    buckets[why].append(r[1])
+                else:
+                    infl_bad.append(r[1])
             done_n[0] += 1
             # 核对阶段不下载，没进度条可刷，恒定走整行心跳（几十个 GB 要算特别久）
-            hb_line("核对本地", True, done_n[0], len(copy_rows), t0,
-                    "坏 %d" % (len(missing) + len(size_bad) + len(hash_bad) + len(unread)))
+            hb_line("核对本地", True, done_n[0], len(chk_rows), t0,
+                    "坏 %d" % (len(missing) + len(size_bad) + len(hash_bad) + len(unread)
+                               + len(infl_bad)))
     bad_local = len(missing) + len(size_bad) + len(hash_bad) + len(unread)
     print("      本地核验：%d/%d 通过，有问题 %d（缺 %d、大小不符 %d、sha256不符 %d、不可读 %d）"
           % (len(copy_rows) - bad_local, len(copy_rows), bad_local,
              len(missing), len(size_bad), len(hash_bad), len(unread)))
+    if len(chk_rows) > len(copy_rows):
+        print("      膨胀版本地副本：核 %d 个，有问题 %d（不参与「能不能删」，只是本地这层保险）"
+              % (len(chk_rows) - len(copy_rows), len(infl_bad)))
+        if infl_bad:
+            print("      样本：%s" % "、".join(os.path.basename(k) for k in infl_bad[:5]))
     for tag, lst in (("sha256 不符", hash_bad), ("本地缺失", missing),
                      ("大小不符", size_bad), ("不可读", unread)):
         if lst:
@@ -955,6 +996,9 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
             infl_norecord += 1
             if got:
                 r[2], r[3] = str(got[0]), got[1]
+                # 状态一起改掉：这一行不再是「大小为空」，--check 下次就不会再把它
+                # 当成「没配上膨胀版」把对应原件挡在可删清单外——现在成品有了，能删了
+                r[6] = "补记(备份时缺)"
             continue
         if got is None:
             infl_gone += 1
@@ -966,7 +1010,9 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
             r[6] = "变动:大小或ETag变了"
         else:
             infl_same += 1
-            r[6] = "已核(未变)"      # 本轮实测记进行里，这份清单本身就是给验收用的凭据
+            # 本轮实测记进行里，这份清单本身就是给验收用的凭据；[1/3] 发现本地副本
+            # 有问题的要带上，不然这一句「已核(未变)」会把坏消息盖掉
+            r[6] = "已核(未变)" + ("；本地副本有问题" if r[1] in set(infl_bad) else "")
     copies_now, _c_infl, _c_other = split_by_suffix(objs, suffixes)
     cur_copies = {k: s for k, s, _e, _sf in copies_now}
     mkeys = {r[1] for r in copy_rows}
@@ -1049,11 +1095,18 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
                          "请按清单逐行删，不要按目录整体删。" % time.strftime("%Y-%m-%d %H:%M:%S"))
     print("\n结论：可以删（按清单逐行删）。可删清单：%s（%d 行，已按实测刷新）"
           % (keys_path, len(keys)))
-    if excluded:
-        print("      另有 %d 个原件本地已备份好，但同层还没有膨胀版（备份那轮就没配上），"
-              "已从清单里排除：%s"
-              % (len(excluded), "、".join(os.path.basename(k) for k in excluded[:3])))
-        print("      它们是重做膨胀版的唯一凭据：要么先补完膨胀版，要么单独留底。")
+    # 同层还欠膨胀版的原件单列一份待补名单：拿 no_infl 全集而不是只看本轮剔掉的
+    # excluded——只要清单里还挂着空凭据行、且现在桶里仍没这个 X.pdf，就都还是欠活
+    pending_all = sorted(no_infl)
+    if pending_all:
+        write_pending_inflated(pending_path, pending_all, suffixes,
+                               note="本清单由 --check 生成于 %s。"
+                                    % time.strftime("%Y-%m-%d %H:%M:%S"))
+        print("      待补膨胀版：%d 个原件同层还没有 X.pdf（备份那轮就没配上），已单列清单："
+              "%s（%d 行）" % (len(pending_all), pending_path, len(pending_all)))
+        print("        样本：%s" % "、".join(os.path.basename(k) for k in pending_all[:3]))
+        print("        它们不参与「能不能删」，也不能删：补完再 --check，"
+              "这些行会从这里消失、并进可删清单。")
     print("      删完后再跑一次 --check，看到“已全部删完且膨胀版未变”才算收尾。")
     print("      用时 %s" % human_secs(time.time() - t0))
 
@@ -1158,6 +1211,9 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="不重下，只按清单核对本地文件（大小+sha256）并重新对账桶")
     ap.add_argument("--force", action="store_true", help="本地已存在也重新下载")
+    ap.add_argument("--with-inflated", action="store_true",
+                    help="把每个 X_ssssss.pdf 对应的膨胀版 X.pdf 也下载下来（默认只记大小+ETag）"
+                         "；体积通常翻十几倍，会计入下载前的容量预检")
     ap.add_argument("--recursive", action="store_true",
                     help="连子目录一起备（默认只列一层，和处理脚本口径一致）")
     ap.add_argument("--no-relist", action="store_true",
@@ -1179,11 +1235,13 @@ def main():
     obj_dir = os.path.join(out_dir, "objects")
     manifest_path = os.path.join(out_dir, "manifest.tsv")
     keys_path = os.path.join(out_dir, "deletable_keys.txt")
+    # 同层还欠膨胀版的原件单独一份名单：它们不参与删除，只提醒人回头补做
+    pending_path = os.path.join(out_dir, "pending_inflated_keys.txt")
     if args.check:
         # 核对模式走自己那套完整流程（本地实测 + 列目录对账 + 出结论），不进备份主线；
         # 放在 makedirs 前面是因为它只读不写目录，没备份过时报错也不要留个空目录
         do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
-                 manifest_path, keys_path, args)
+                 manifest_path, keys_path, pending_path, args)
         return
     if not args.dry_run:
         # 干跑连目录都不建：它承诺「只列清单不下载」，留个空文件夹出来反而让人分不清
@@ -1221,11 +1279,23 @@ def main():
         print("（另有 %d 个对象不属于上述两类，忽略）" % len(others))
 
     # ---- 下载前先把账算清楚：要备多少 / 本地已有多少 / 还要新写多少 / 盘还剩多少 ----
+    # 任务表把原件和（可选的）膨胀版拼成一份，行格式 [key, size, etag, kind]：
+    # 前两位正好是 estimate_local 要的 (key, size)，所以预扫本地、下载、写清单三步共用
+    # 这一张表，不会出现「账上算了膨胀版、下载却没下」这种两本账。
+    infl_tasks = [[p[4], p[5], p[6], "INFLATED"] for p in pairs_use if p[5] is not None]
+    copy_tasks = [[p[0], p[1], p[2], "COPY"] for p in pairs_use]
+    tasks = copy_tasks + (infl_tasks if args.with_inflated else [])
     t_scan = time.time()
     need = sum(p[1] for p in pairs_use)
-    reuse, reuse_cnt, miss_cnt = estimate_local(pairs_use, out_dir, bucket, key_prefix,
+    reuse, reuse_cnt, miss_cnt = estimate_local(copy_tasks, out_dir, bucket, key_prefix,
                                                 args.recursive)
     new_need = need - reuse
+    need_i = sum(t[1] for t in infl_tasks)
+    reuse_i = reuse_ic = miss_ic = 0
+    if args.with_inflated:
+        reuse_i, reuse_ic, miss_ic = estimate_local(infl_tasks, out_dir, bucket, key_prefix,
+                                                    args.recursive)
+        new_need += need_i - reuse_i     # 膨胀版也算进同一个闸门，不够就一起拦下
     min_free = max(0, int(args.min_free)) * _MIB
     free = disk_free(out_dir)
     usable = free - min_free
@@ -1234,16 +1304,33 @@ def main():
           % human_secs(time.time() - t_scan))
     print("  本轮要备份 %d 个 %s，合计 %s"
           % (len(pairs_use), "/".join(suffixes), human_size(need)))
-    print("  本地已有   %d 个（%s）可跳过不重下；还要新写 %d 个，%s"
-          % (reuse_cnt, human_size(reuse), miss_cnt, human_size(new_need)))
-    if args.force and reuse_cnt:
+    if args.with_inflated:
+        print("  膨胀版     %d 个（--with-inflated：一并下载），合计 %s；本地已有 %d 个（%s），"
+              "还要新写 %d 个 %s"
+              % (len(infl_tasks), human_size(need_i), reuse_ic, human_size(reuse_i),
+                 miss_ic, human_size(need_i - reuse_i)))
+    else:
+        print("  膨胀版     %d 个、合计 %s 不下载（只往清单里记大小+ETag；要一起备就加 "
+              "--with-inflated）" % (len(infl_tasks), human_size(need_i)))
+    if args.with_inflated:
+        print("  本地已有   %d 个（%s）可跳过不重下；还要新写 %d 个（原件 %d + 膨胀版 %d），%s"
+              % (reuse_cnt + reuse_ic, human_size(reuse + reuse_i), miss_cnt + miss_ic,
+                 miss_cnt, miss_ic, human_size(new_need)))
+    else:
+        print("  本地已有   %d 个（%s）可跳过不重下；还要新写 %d 个，%s"
+              % (reuse_cnt, human_size(reuse), miss_cnt, human_size(new_need)))
+    if args.force and (reuse_cnt or reuse_ic):
         print("  （--force：%d 个已存在的会重下覆盖，盘上不会双份，但要多跑 %s 传输）"
-              % (reuse_cnt, human_size(reuse)))
+              % (reuse_cnt + reuse_ic, human_size(reuse + reuse_i)))
     print("  目标盘     %s 剩余 %s；按 --min-free 预留 %s → 可用 %s"
           % (os.path.abspath(out_dir), human_size(free),
              human_size(min_free), human_size(usable)))
     print("  结论         %s" % ("够，下完预计还能用 %s" % human_size(usable - new_need)
                                 if enough else "不够，还差 %s" % human_size(new_need - usable)))
+    if not enough and args.with_inflated and (need_i - reuse_i) > (need - reuse):
+        # 账不够时先说哪一笔是大头，不然人只会去查原件那边
+        print("  （大头是膨胀版：%s vs 原件 %s；想去掉膨胀版就重跑不带 --with-inflated，"
+              "或先用 --limit 分批）" % (human_size(need_i - reuse_i), human_size(need - reuse)))
     confirm_start(args, enough, new_need, usable, out_dir)
 
     if args.dry_run:
@@ -1252,19 +1339,23 @@ def main():
             print("  %s（%s） ←→ 膨胀版 %s（%s，etag=%s）"
                   % (os.path.basename(p[0]), human_size(p[1]), os.path.basename(p[4]),
                      human_size(p[5]) if p[5] else "缺失", (p[6] or "-")[:12]))
-        print("去掉 --dry-run 即开始下载（会先把上面这份账再打一遍并要你确认）。")
+        print("去掉 --dry-run 即开始下载%s（会先把上面这份账再打一遍并要你确认）。"
+              % ("，含膨胀版" if args.with_inflated else ""))
         return
 
     # 断点续跑靠本地文件存在且大小一致来判（不重下），本轮结束后整份重写清单
     client = ReadOnlyClient(endpoint, ak, sk, bucket, int(CONFIG["RETRIES"]))
     rows, done_n, skip_n, fail_n = [], 0, 0, 0
     t0 = time.time()
-    total_n = len(pairs_use)
+    total_n = len(tasks)
 
-    def one(p):
+    def fetch(t):
         nonlocal done_n, skip_n, fail_n
-        key, size, etag, sf, inflated_key, isize, ietag = p
+        key, size, etag, kind = t
         dest = local_path_for(out_dir, key, "%s/%s" % (bucket, key_prefix), args.recursive)
+        # 标一下这条下的是原件还是膨胀版：两份文件同放一个 objects 目录，名字又只差后缀，
+        # 不打标在进度条上看不出下的是哪一份（原件几十 KB，膨胀版八九 MB）
+        tag = "膨胀版 " if kind == "INFLATED" else ""
         name = os.path.basename(key)
         status, sha = "", ""
         if os.path.exists(dest) and os.path.getsize(dest) == size and not args.force:
@@ -1275,7 +1366,7 @@ def main():
                 status = "失败:本地不可读 %s" % e
         else:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            prog = Progress("下载 %s" % name, size, quiet, cols, _lock)
+            prog = Progress("下载 %s%s" % (tag, name), size, quiet, cols, _lock)
             try:
                 got, sha, _ = client.download(key, dest, size, prog)
                 if got != size:
@@ -1297,17 +1388,17 @@ def main():
         if not quiet:
             print("[%d/%d] %s %s：%s %s sha256=%s"
                   % (n, total_n, "✓" if not status.startswith("失败") else "✗",
-                     name, status, human_size(size), (sha or "-")[:12]))
+                     tag + name, status, human_size(size), (sha or "-")[:12]))
         elif n % 50 == 0 or n == total_n:
             with _lock:
                 sys.stderr.write("[%s] 已备份 %d/%d（新下 %d、跳过 %d、失败 %d）\n"
                                  % (human_secs(time.time() - t0), n, total_n,
                                     done_n, skip_n, fail_n))
                 sys.stderr.flush()
-        return ["COPY", key, size, etag, sha, dest if os.path.exists(dest) else "", status]
+        return [kind, key, size, etag, sha, dest if os.path.exists(dest) else "", status]
 
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-        futs = [ex.submit(one, p) for p in pairs_use]
+        futs = [ex.submit(fetch, t) for t in tasks]
         try:
             for fu in as_completed(futs):
                 rows.append(fu.result())
@@ -1316,19 +1407,40 @@ def main():
                 fu.cancel()
             print("\n中断：本轮没跑完，清单已落盘但不完整 —— 先别删。")
             write_manifest(manifest_path, rows,
-                           manifest_meta(prefix, suffixes, False, len(rows), 0,
+                           manifest_meta(prefix, suffixes, False,
+                                         len([r for r in rows if r[0] == "COPY"]),
+                                         len([r for r in rows if r[0] == "INFLATED"]),
                                          note="本轮被 Ctrl+C 中断，清单不完整"))
             raise
 
-    # 膨胀版只出清单，不下内容
-    infl_rows = [["INFLATED", ik, isize if isize is not None else "", ietag or "", "", "",
-                  "清单(不下内容)"] for (_k, _s, _e, _sf, ik, isize, ietag) in pairs]
-    all_rows = sorted(rows + infl_rows, key=lambda r: (r[0], r[1]))
-    meta_lines = manifest_meta(prefix, suffixes, complete, len(rows), len(infl_rows))
+    # 膨胀版的清单行：没下就只记大小+ETag（靠 --check 事后对账）；真下了就把实测的
+    # sha256 和本地路径一并填进去，这份清单同时就是膨胀版本体的凭据
+    if args.with_inflated:
+        infl_rows = [r for r in rows if r[0] == "INFLATED"]
+        # 本轮真下过的只有几条：剩下那些（被 --limit 截掉的、或桶里本来就没膨胀版的）
+        # 仍得按全量补上凭据行，不然清单会从「全量凭据」缩水成「本轮下过的那几条」，
+        # --check 再跑就没东西可对；大小为空的那些行也正是 --check 用来认「缺配对」的记号
+        got_i = {r[1] for r in infl_rows}
+        infl_rows += [["INFLATED", ik, isize if isize is not None else "", ietag or "", "", "",
+                       "清单(不下内容)"]
+                      for (_k, _s, _e, _sf, ik, isize, ietag) in pairs if ik not in got_i]
+    else:
+        infl_rows = [["INFLATED", ik, isize if isize is not None else "", ietag or "", "", "",
+                      "清单(不下内容)"] for (_k, _s, _e, _sf, ik, isize, ietag) in pairs]
+    # 只拿 rows 里的原件部：膨胀版行已经全在 infl_rows 里了（下面那两条就是同一个对象的
+    # 引用），两块直接拼会把真下载那几条写两遍——清单上同一 key 出两条 INFLATED，
+    # --check 读成字典时谁覆盖谁全凭排序，刚填进去的 sha256 会被空行盖掉
+    all_rows = sorted([r for r in rows if r[0] == "COPY"] + infl_rows,
+                      key=lambda r: (r[0], r[1]))
+    meta_lines = manifest_meta(prefix, suffixes, complete,
+                               len([r for r in rows if r[0] == "COPY"]), len(infl_rows))
     write_manifest(manifest_path, all_rows, meta_lines)
 
-    ok_rows = [r for r in rows if r[6] in ("已下载", "已存在跳过")]
-    fail_rows = [r for r in rows if r[6].startswith("失败")]
+    # 「能不能删」只看原件：膨胀版还好端端待在桶里，它下没下成功不影响回滚凭据是否齐
+    ok_rows = [r for r in rows if r[0] == "COPY" and r[6] in ("已下载", "已存在跳过")]
+    fail_rows = [r for r in rows if r[0] == "COPY" and r[6].startswith("失败")]
+    ok_infl = [r for r in rows if r[0] == "INFLATED" and r[6] in ("已下载", "已存在跳过")]
+    fail_infl = [r for r in rows if r[0] == "INFLATED" and r[6].startswith("失败")]
 
     # ---- 对账：再列一次目录，确认 S == S'，并且本地一个都不缺 ----
     verdict = "先别删"
@@ -1369,12 +1481,28 @@ def main():
 
     print("\n===== 备份结束 =====")
     print("对象：%d 个待备份；成功 %d（新下 %d、已存在跳过 %d），失败 %d"
-          % (len(pairs), len(ok_rows), done_n, skip_n, len(fail_rows)))
+          % (len(pairs), len(ok_rows),
+             len([r for r in ok_rows if r[6] == "已下载"]),
+             len([r for r in ok_rows if r[6] == "已存在跳过"]), len(fail_rows)))
+    if args.with_inflated:
+        print("膨胀版：%d 个已到本地（新下 %d、跳过 %d），失败 %d"
+              % (len(ok_infl), len([r for r in ok_infl if r[6] == "已下载"]),
+                 len([r for r in ok_infl if r[6] == "已存在跳过"]), len(fail_infl)))
+        if fail_infl:
+            # 膨胀版下失败不影响「能不能删」（桶里那份还在），但本地多出来的保险缺了几块
+            print("  失败样本：%s" % "、".join(
+                "%s→%s" % (os.path.basename(r[1]), r[6][:40]) for r in fail_infl[:3]))
+            print("  重跑本命令即可接着下（已下好的会跳过）")
     print("清单：%s（含 %d 条 COPY + %d 条膨胀版 INFLATED 校验记录）"
-          % (manifest_path, len(rows), len(infl_rows)))
-    print("容量：本地 %s；膨胀版未下载（合计 %s，只留了大小+ETag）"
-          % (human_size(sum(int(r[2] or 0) for r in rows)),
-             human_size(sum(int(r[2] or 0) for r in infl_rows))))
+          % (manifest_path, len([r for r in rows if r[0] == "COPY"]), len(infl_rows)))
+    if args.with_inflated:
+        print("容量：本地 %s，其中膨胀版 %s（和原件放同一层 objects 目录，靠文件名区分）"
+              % (human_size(sum(int(r[2] or 0) for r in rows)),
+                 human_size(sum(int(r[2] or 0) for r in rows if r[0] == "INFLATED"))))
+    else:
+        print("容量：本地 %s；膨胀版未下载（合计 %s，只留了大小+ETag）"
+              % (human_size(sum(int(r[2] or 0) for r in rows)),
+                 human_size(sum(int(r[2] or 0) for r in infl_rows))))
     print("用时：%s" % human_secs(time.time() - t0))
 
     # 找不到膨胀版的原件不进可删清单：同层没有 X.pdf = 上一轮处理没做完，而这个 _sssss
@@ -1390,12 +1518,7 @@ def main():
                                 if keep_out else ""))
             print("结论：可以删。可删清单：%s（%d 行）" % (keys_path, len(dl_keys)))
         else:
-            print("结论：本轮没有可删项（全部被下面那条排除了）。")
-        if keep_out:
-            print("      注意：%d 个原件同层还没有膨胀版（上一轮没做完），已从清单里排除："
-                  "%s" % (len(keep_out),
-                          "、".join(os.path.basename(k) for k in sorted(keep_out)[:3])))
-            print("      它们是重做膨胀版的唯一凭据：要么先把膨胀版补出来，要么单独留底，别顺手删。")
+            print("结论：本轮没有可删项（唯一那些都被下面的待补名单排除了）。")
     else:
         if fail_rows:
             print("失败样本（前 5）：")
@@ -1403,6 +1526,24 @@ def main():
                 print("  %s → %s" % (os.path.basename(r[1]), r[6]))
         print("结论：先别删。要么有机器还在跑这个目录，要么上面有失败项；"
               "重跑本脚本（会自动接着备）直到出现「可以删」。")
+
+    # 不管本轮结论是什么，「同层还欠一个膨胀版」的原件都要留一份名单给人工：
+    # 光在终端打三行样本，跑过就丢了，而这一批恰恰是要回头补做的活
+    if keep_out:
+        # 能走到这里就肯定了不是干跑（干跑在上面就 return 了），所以不用再看 args.dry_run
+        write_pending_inflated(pending_path, keep_out, suffixes,
+                               note="本清单由备份轮生成于 %s。"
+                                    % time.strftime("%Y-%m-%d %H:%M:%S"))
+        print("      待补膨胀版：%d 个原件同层还没有 X.pdf（上一轮没做完），%s："
+              "%s（%d 行）"
+              % (len(keep_out),
+                 "已从可删清单里排除" if verdict == "可以删" else "不能删，已另出清单",
+                 pending_path, len(keep_out)))
+        print("        样本：%s" % "、".join(os.path.basename(k) for k in sorted(keep_out)[:3]))
+        # 整条命令放在一行里打印，不然人复制的时候断成两行就不能直接跑
+        print("        要补做：python pdf_rename_inflate_upload.py --prefix \"<同一目录>\" "
+              "--files-from \"%s\"" % os.path.basename(pending_path))
+        print("        补完再 --check：这些行会从这里消失、并进可删清单；在此之前它们绝不能删。")
     # 把最终结论也写进清单头：日后只翻这一份文件就知道当初判到哪一步了
     write_manifest(manifest_path, all_rows,
                    meta_lines + ["# 结论=%s（备份轮列目录：完整=%s，对账=%s）"
