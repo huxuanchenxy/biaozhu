@@ -444,11 +444,43 @@ def hb_line(label: str, quiet: bool, done: int, total: int, t0: float, note: str
         sys.stderr.flush()
 
 
+def hb_scan(quiet, scanned, n_copy, pages, t0, suffixes, force=False):
+    """列目录这种「拿不到总数」的长跑专用心跳：前台（交互终端）用 \\r 原地刷一行，
+       静默/重定向时每 _HEARTBEAT 秒报整行。
+       hb_line 是 done/total 语义、列目录根没有 total 可给；而它开头那句「not quiet 就静音」
+       正是大目录前台跑时屏幕一片空白、看着像卡死的原因 —— 几十万个对象要翻几百页。"""
+    now = time.time()
+    if not force and now - _hb["last"] < _HEARTBEAT:
+        return
+    _hb["last"] = now
+    if force:
+        if not quiet:
+            with _lock:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+        return
+    rate = scanned / (now - t0) if now > t0 else 0
+    line = ("[%s] 列目录中… 已扫 %s 个对象（其中要备的 %s %s 个），翻了 %s 页，约 %s 个/秒"
+            % (human_secs(now - t0), format(int(scanned), ","),
+               "+".join(suffixes or ()) or "-", format(int(n_copy), ","),
+               format(int(pages), ","), format(int(rate), ",")))
+    cut = _truncate(line, 100)
+    with _lock:
+        if quiet:
+            sys.stderr.write(cut + "\n")
+        else:
+            sys.stderr.write("\r" + cut + " " * max(0, 100 - _disp_width(cut)))
+        sys.stderr.flush()
+
+
 # ---------------- 列目录（ListObjectsV2）：只读，一次拿回 key + size + ETag ----------------
 
 def list_objects(endpoint, ak, sk, bucket, key_prefix, quiet=False, recursive=False,
-                 max_list=0, copy_suffixes=None):
+                 max_list=0, copy_suffixes=None, stats=None):
     """翻遍 prefix，返回 [(key, size, etag)]。
+
+    stats：可选的一个 dict，用来把「扫到哪了」的计数实时透给调用方——人 Ctrl+C 的时候，
+    函数内部的局部变量跟着栈一起没了，不递出来就没人知道他到底扫了多少。
 
     为什么用列目录而不是逐个 HEAD：ListObjectsV2 的每一行本来就带 Size 和 ETag，
     所以「有哪些 _sssss、各多大」和「对应膨胀版多大、ETag 是多少」一次翻页就全拿到了，
@@ -464,7 +496,9 @@ def list_objects(endpoint, ak, sk, bucket, key_prefix, quiet=False, recursive=Fa
     n_copy = 0            # 已列对象里有多少是待备份的 _sssss（长跑时唯一能判断「列对了」的信号）
     t0 = time.time()
     scanned = 0
+    pages = 0
     while True:
+        pages += 1
         params = {"list-type": "2", "encoding-type": "url", "max-keys": "1000",
                   "prefix": key_prefix}
         if not recursive:
@@ -507,12 +541,12 @@ def list_objects(endpoint, ak, sk, bucket, key_prefix, quiet=False, recursive=Fa
         if max_list > 0 and scanned >= max_list:
             break
         token = urllib.parse.unquote(root.findtext("%sNextContinuationToken", ""))
-        if copy_suffixes:
-            hb_line("列目录中", quiet, len(out), n_copy, t0,
-                    "（前一个数=已列对象，后一个=其中要备的 %s；对象多要翻很多页，没输出不等于卡住）"
-                    % "/".join(copy_suffixes))
-        else:
-            hb_line("列目录中", quiet, len(out), 0, t0, "（对象多要翻很多页，没输出不等于卡住）")
+        if stats is not None:
+            stats.update(scanned=scanned, n_copy=n_copy, pages=pages, t0=t0)
+        hb_scan(quiet, scanned, n_copy, pages, t0, copy_suffixes)
+    if stats is not None:
+        stats.update(scanned=scanned, n_copy=n_copy, pages=pages, t0=t0)
+    hb_scan(quiet, scanned, n_copy, pages, t0, copy_suffixes, force=True)
     out.sort()
     return out, complete
 
@@ -1010,8 +1044,16 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
     # ---- [2/3] 列一次目录：拿当前 size/ETag 与清单对账 ----
     print("\n[2/3] 列目录对账（只列一次，不下载）…")
     hb_reset()
-    objs, cur_complete = list_objects(endpoint, ak, sk, bucket, key_prefix, True,
-                                      args.recursive, args.max_list, copy_suffixes=suffixes)
+    scan = {}
+    t_scan = time.time()
+    try:
+        objs, cur_complete = list_objects(endpoint, ak, sk, bucket, key_prefix, True,
+                                         args.recursive, args.max_list,
+                                         copy_suffixes=suffixes, stats=scan)
+    except KeyboardInterrupt:
+        interrupt_note(scan, t_scan, "--check 对账列目录", suffixes,
+                       note="桶里一个对象都没动过；本地也没写任何东西（核对结果还没落盘）。")
+        sys.exit(130)
     cur = {k: (s, e) for k, s, e in objs}
     infl_same = infl_changed = infl_gone = infl_norecord = 0
     changed_keys, gone_keys = [], []
@@ -1217,6 +1259,27 @@ def confirm_start(args, enough, new_need, usable, out_dir):
     sys.exit(0)
 
 
+def interrupt_note(scan, t0, where, suffixes, note=None):
+    """Ctrl+C 停在列目录时，只丢一句「已中断」太薄。人此刻需要三件事：扫到哪了、
+       有没有留下烂摊子、下次怎么少受罪。一次说清。"""
+    el = max(0.001, time.time() - t0)
+    print("\n已中断（%s阶段，用时 %s）。" % (where, human_secs(el)))
+    if scan.get("scanned"):
+        print("  列目录扫到 %s 个对象就停了（其中要备的 %s %s 个，翻了 %s 页，"
+              "平均约 %s 个/秒）—— 这个目录确实大。"
+              % (format(scan["scanned"], ","), "/".join(suffixes),
+                 format(scan["n_copy"], ","), format(scan["pages"], ","),
+                 format(int(scan["scanned"] / el), ",")))
+    print("  " + (note or "桶里一个对象都没动过（本脚本全程只读），本地清单也还没开始写；"
+                        "最多只剩一个空的 objects 目录，想清掉随时能删。"))
+    print("  硬列完整不值当，三条路：")
+    print("    ① 先摸底：--max-list 20000，列够就停（清单会标「列目录完整=no」，据此禁止删除）")
+    print("    ② 分批跑：--prefix 指到更深一层的子目录，一个子目录一轮")
+    print("    ③ 放后台：把输出重定向到文件，非终端时每 %.0f 秒报一行整行进度"
+          "（前台是原地刷新）" % _HEARTBEAT)
+    print("    心跳想更勤：环境变量 PDF_HEARTBEAT=2（默认 5 秒）")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="把一个目录的 _sssss 原件备份到本地 + 给膨胀版出校验清单"
@@ -1236,7 +1299,7 @@ def main():
     ap.add_argument("-j", "--jobs", type=int, default=CONFIG["JOBS"], help="并发下载线程数")
     ap.add_argument("-n", "--limit", type=int, default=0, help="最多备份几个（0=不限）")
     ap.add_argument("--max-list", type=int, default=0,
-                    help="最多列多少个对象就停（摸底/自测用；停过就代表清单不完整，禁止删）")
+                    help="最多列多少个对象就停（大目录先拿它摸底；停过就代表清单不完整，禁止删）")
     ap.add_argument("--dry-run", action="store_true", help="只列清单与容量估算，不下载")
     ap.add_argument("--min-free", type=int, default=1024, metavar="MIB",
                     help="目标盘至少留下的余量（MiB）；算下来不够就不开始备份")
@@ -1290,8 +1353,16 @@ def main():
     print("口径：只读脚本，全程只有 GET 与 ListObjectsV2，不会改动桶\n")
 
     t_all = time.time()
-    objs, complete = list_objects(endpoint, ak, sk, bucket, key_prefix, quiet,
-                                  args.recursive, args.max_list, copy_suffixes=suffixes)
+    scan = {}
+    print("正在列目录…（对象多时要翻很多页，这行下面每 %.0f 秒刷一次进度；"
+          "想先摸底就重跑加 --max-list 20000）" % _HEARTBEAT)
+    try:
+        objs, complete = list_objects(endpoint, ak, sk, bucket, key_prefix, quiet,
+                                      args.recursive, args.max_list, copy_suffixes=suffixes,
+                                      stats=scan)
+    except KeyboardInterrupt:
+        interrupt_note(scan, t_all, "首次列目录", suffixes)
+        sys.exit(130)
     copies, inflated, others = split_by_suffix(objs, suffixes)
     pairs, missing_infl = build_paired(copies, inflated, suffixes)
     total_bytes = sum(p[1] for p in pairs)
@@ -1480,8 +1551,16 @@ def main():
     verdict = "先别删"
     if not args.no_relist:
         print("\n重新列目录对账（确认备份期间桶没被动过）…")
-        objs2, complete2 = list_objects(endpoint, ak, sk, bucket, key_prefix, quiet,
-                                        args.recursive, args.max_list, copy_suffixes=suffixes)
+        scan2, t_re = {}, time.time()
+        try:
+            objs2, complete2 = list_objects(endpoint, ak, sk, bucket, key_prefix, quiet,
+                                           args.recursive, args.max_list,
+                                           copy_suffixes=suffixes, stats=scan2)
+        except KeyboardInterrupt:
+            interrupt_note(scan2, t_re, "对账列目录", suffixes,
+                           note="桶里一个对象都没动过；已下载的备份件全部在本地，重跑会跳过；"
+                                "但本轮清单还没落盘，别按半截清单删东西。")
+            sys.exit(130)
         copies2, _i2, _o2 = split_by_suffix(objs2, suffixes)
         # 基线用「第一轮列到的全集」而不是「本轮下成功的」：后者会把下载失败、
         # 或 -n 没做到底的项误报成“桶里新增了一个、有机器在跑！”，把人的注意力带偏
@@ -1599,4 +1678,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        sys.exit("已中断")
+        sys.exit("\n已中断。本轮没跑完：列目录或下载被打断时清单不会落盘，"
+                 "重跑本脚本会自动接着备；没拿到完整清单前不要删任何对象。")
