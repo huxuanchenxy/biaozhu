@@ -36,7 +36,7 @@ pdf_backup_sssss.py —— 把一个目录里的 _sssss 原件备份到本地，
   # 后台跑（重定向里问不到人）必须显式 --yes，否则脚本会算完账就退出、不会开下载：
   nohup python3 -u pdf_backup_sssss.py --endpoint http://10.0.0.1:9000 \
       --prefix "drivdernet_abc/自筹/5_材料基因库/5.1_通用材料基因数据/成品语料" \
-      -j 8 -q --yes > backup_5.1通用.out 2>&1 &
+      -j 8 --yes > backup_5.1通用.out 2>&1 &
 
 Windows（PowerShell）干脆写成一长行，记得给目录加双引号（路径里有中文和下划线都没事，
       但 PowerShell 会把不引起来的中文路径按空白切词）：
