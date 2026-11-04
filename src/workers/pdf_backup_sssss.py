@@ -540,7 +540,17 @@ def list_objects(endpoint, ak, sk, bucket, key_prefix, quiet=False, recursive=Fa
             break
         if max_list > 0 and scanned >= max_list:
             break
-        token = urllib.parse.unquote(root.findtext("%sNextContinuationToken", ""))
+        # 本行曾漏掉 `% _NS`：findtext 的第二个参数是「默认值」，带字面 %s 的标签名永远查不到，
+        # token 因此恒为空串 → 下一轮请求又回到第一页。不报错、不崩，只是数一直涨：
+        # 实测把 278 个对象的目录报成「5,475,766 个对象、翻 19,697 页」（19,697×278 恰好对上），
+        # 跑了 26 分钟、内存堆到 1.8GB，其实一步都没走。现在取不到 token 就直接中止喊人。
+        nxt = urllib.parse.unquote(root.findtext("%sNextContinuationToken" % _NS, ""))
+        if not nxt:
+            sys.exit("错误：网关说这一页没列完（IsTruncated=true）却没给 NextContinuationToken，"
+                     "继续请求只会反复拿同一页，已中止（本轮数据不可信，不要据此判断可删）")
+        if nxt == token:
+            sys.exit("错误：翻页没推进（NextContinuationToken 与上一页相同），已中止")
+        token = nxt
         if stats is not None:
             stats.update(scanned=scanned, n_copy=n_copy, pages=pages, t0=t0)
         hb_scan(quiet, scanned, n_copy, pages, t0, copy_suffixes)
