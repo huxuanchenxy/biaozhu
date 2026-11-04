@@ -861,8 +861,18 @@ def write_pending_inflated(path, keys, suffixes, note=""):
     """待补名单：这些 _sssss 原件在同层找不到对应的膨胀版 X.pdf。它们不是「可删」而是
        「还欠活」，所以要单独出一份文件交人工，不能混在删除流程里。只在终端打三行样本
        不够：跑过就丢了，而这一批恰恰是要回头补做的活。
-       每行一个 basename、# 开头是注释，能直接喂给处理脚本的 --files-from（它认 X_sssss.pdf）."""
+       每行一个 basename、# 开头是注释，能直接喂给处理脚本的 --files-from（它认 X_sssss.pdf）.
+       keys 为空时写一份「0 行」的：待补名单必须反映现在的欠账，不能当历史快照留下。"""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
+        if not keys:
+            f.write("# 当前没有待补项：本目录每个 %s 原件在同层都能找到对应的膨胀版 X.pdf。\n"
+                    % "/".join(suffixes))
+            f.write("# 本文件留着只为刷新时间戳：上一份「绝对不能删」的名单如果一直\n"
+                    "# 躺在目录里，会和新的可删清单互相打脸，反而分不清该信哪份。\n")
+            f.write("# 共 0 行。\n")
+            if note:
+                f.write("# " + note + "\n")
+            return path
         f.write("# 这些 %s 原件在同层找不到对应的膨胀版 X.pdf：上一轮处理没做完，"
                 "或者成品本来就放到子目录去了。\n" % "/".join(suffixes))
         f.write("# 本地已经备份好，但它们绝对不能删 —— 是重做膨胀版的唯一凭据。\n")
@@ -877,6 +887,22 @@ def write_pending_inflated(path, keys, suffixes, note=""):
         for k in sorted(keys):
             f.write(os.path.basename(k) + "\n")
     return path
+
+
+def refresh_pending_inflated(path, keys, suffixes, note=""):
+    """待补名单的统一口子：有欠账就写名单；欠账还清了也要把旧文件刷成 0 行，不让它做过期
+       情报。返回刷新前旧名单里的条数（没旧文件、或本轮有欠账时返回 0，调用方据此决定要
+       不要提一嘴）。"""
+    if keys:
+        write_pending_inflated(path, keys, suffixes, note=note)
+        return 0
+    if not os.path.exists(path):
+        return 0
+    prev = [l for l in open(path, encoding="utf-8") if l.strip() and not l.startswith("#")]
+    write_pending_inflated(path, [], suffixes,
+                           note=("%s上一份名单里的 %d 行本轮已全部对上。" % (note, len(prev))
+                                 if prev else note))
+    return len(prev)
 
 
 def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
@@ -1099,14 +1125,22 @@ def do_check(endpoint, ak, sk, prefix, bucket, key_prefix, suffixes, out_dir,
     # excluded——只要清单里还挂着空凭据行、且现在桶里仍没这个 X.pdf，就都还是欠活
     pending_all = sorted(no_infl)
     if pending_all:
-        write_pending_inflated(pending_path, pending_all, suffixes,
-                               note="本清单由 --check 生成于 %s。"
-                                    % time.strftime("%Y-%m-%d %H:%M:%S"))
+        refresh_pending_inflated(pending_path, pending_all, suffixes,
+                                 note="本清单由 --check 生成于 %s。"
+                                      % time.strftime("%Y-%m-%d %H:%M:%S"))
         print("      待补膨胀版：%d 个原件同层还没有 X.pdf（备份那轮就没配上），已单列清单："
               "%s（%d 行）" % (len(pending_all), pending_path, len(pending_all)))
         print("        样本：%s" % "、".join(os.path.basename(k) for k in pending_all[:3]))
         print("        它们不参与「能不能删」，也不能删：补完再 --check，"
               "这些行会从这里消失、并进可删清单。")
+    else:
+        # 同备份轮：--check 发现欠账已还清，就把旧名单刷成 0 行，免得它一直挂着让人以为还有活要补
+        cleared = refresh_pending_inflated(pending_path, [], suffixes,
+                                          note="本清单由 --check 刷新于 %s。"
+                                               % time.strftime("%Y-%m-%d %H:%M:%S"))
+        if cleared:
+            print("      待补膨胀版：本轮已全部对上（上一份名单里的 %d 行已补完），"
+                  "名单已刷新为 0 行：%s" % (cleared, pending_path))
     print("      删完后再跑一次 --check，看到“已全部删完且膨胀版未变”才算收尾。")
     print("      用时 %s" % human_secs(time.time() - t0))
 
@@ -1531,9 +1565,9 @@ def main():
     # 光在终端打三行样本，跑过就丢了，而这一批恰恰是要回头补做的活
     if keep_out:
         # 能走到这里就肯定了不是干跑（干跑在上面就 return 了），所以不用再看 args.dry_run
-        write_pending_inflated(pending_path, keep_out, suffixes,
-                               note="本清单由备份轮生成于 %s。"
-                                    % time.strftime("%Y-%m-%d %H:%M:%S"))
+        refresh_pending_inflated(pending_path, keep_out, suffixes,
+                                 note="本清单由备份轮生成于 %s。"
+                                      % time.strftime("%Y-%m-%d %H:%M:%S"))
         print("      待补膨胀版：%d 个原件同层还没有 X.pdf（上一轮没做完），%s："
               "%s（%d 行）"
               % (len(keep_out),
@@ -1544,6 +1578,14 @@ def main():
         print("        要补做：python pdf_rename_inflate_upload.py --prefix \"<同一目录>\" "
               "--files-from \"%s\"" % os.path.basename(pending_path))
         print("        补完再 --check：这些行会从这里消失、并进可删清单；在此之前它们绝不能删。")
+    else:
+        # 上一个目录有欠账、这一轮补完了：旧名单不能就在那儿躺着不提
+        cleared = refresh_pending_inflated(pending_path, [], suffixes,
+                                          note="本清单由备份轮刷新于 %s。"
+                                               % time.strftime("%Y-%m-%d %H:%M:%S"))
+        if cleared:
+            print("      待补膨胀版：本轮已全部对上（上一份名单里的 %d 行已补完），"
+                  "名单已刷新为 0 行：%s" % (cleared, pending_path))
     # 把最终结论也写进清单头：日后只翻这一份文件就知道当初判到哪一步了
     write_manifest(manifest_path, all_rows,
                    meta_lines + ["# 结论=%s（备份轮列目录：完整=%s，对账=%s）"
