@@ -804,12 +804,13 @@ class RunLog:
         self.deleting = (action == "删除")
         self.freed = 0
         self.counts = {"ok": 0, "fail": 0, "skip": 0}
+        self.t0 = time.time()                       # 执行阶段起点：close 时算总耗时用
+        self.start_str = time.strftime("%Y-%m-%d %H:%M:%S")
         self._log = io.open(log_path, "w", encoding="utf-8", newline="\n")
         self._ok = io.open(ok_path, "w", encoding="utf-8", newline="\n")
         self._fail = None
         self._log.write(u"# %s流水日志（边做边记：每件完成即落盘，中途断了也已写好的都在）\n" % action)
-        self._log.write(u"# 开始 %s　本轮目标 %d 个\n" % (
-            time.strftime("%Y-%m-%d %H:%M:%S"), total))
+        self._log.write(u"# 开始 %s　本轮目标 %d 个\n" % (self.start_str, total))
         for h in extra_header:
             self._log.write(u"# %s\n" % h)
         self._log.flush()
@@ -1497,7 +1498,11 @@ def finish(w, run, n_copies, n_pending, n_small, action, trash, no_trash,
     summary.append("# 回收站：%s%s" % (
         "已关闭（无桶内副本）" if (no_trash or backup_root) else trash,
         "；本地留底：%s" % backup_root if backup_root else ""))
-    summary.append("# 结束 %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    # 总耗时：从「开始」到「结束」（仅删除/恢复执行阶段；列目录与校验在这之前，不在此区间）
+    summary.append("# 耗时 %s（开始 %s → 结束 %s）" % (
+        human_secs(time.time() - w.t0), w.start_str, end_str))
+    summary.append("# 结束 %s" % end_str)
     w.close(summary)
 
     print("\n结果：成功 %s 个%s；跳过 %s；失败 %s"
