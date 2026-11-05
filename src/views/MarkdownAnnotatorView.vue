@@ -8,6 +8,7 @@ import { getDocJson, getMinioDocJson, saveDocJson } from '@/api'
 import type { DocJsonRecord } from '@/api/types'
 import {
   deriveAnnotationKeys,
+  deriveBackupPdfKeys,
   derivePdfKey,
   deriveTranslatedMdKey,
   getObjectBlobUrl,
@@ -120,7 +121,8 @@ async function loadDoc() {
   loading.value = false
 }
 
-/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供原生渲染器显示 */
+/** 拉取原始 PDF：由 md 的 key 推导 pdf key，取二进制生成 blob URL 供原生渲染器显示。
+ * 兼容处理过的目录：X.pdf（膨胀版）不存在时，依次回退尝试备份原件 X_sssss.pdf 等。 */
 async function loadPdf() {
   // 切换文档前先释放上一次的 blob URL，避免内存泄漏
   if (pdfUrl.value) {
@@ -134,13 +136,21 @@ async function loadPdf() {
     return
   }
   pdfLoading.value = true
-  try {
-    pdfUrl.value = await getObjectBlobUrl(pdfKey.value)
-  } catch (e: any) {
-    pdfError.value = `PDF 加载失败：${e?.message ?? '未知错误'}`
-  } finally {
-    pdfLoading.value = false
+  // 按顺序尝试：主 PDF（膨胀版 X.pdf）→ 备份原件（X_sssss.pdf 等），全部失败才报错
+  const candidates = [pdfKey.value, ...deriveBackupPdfKeys(pdfKey.value)]
+  let lastError: any = null
+  for (const candidate of candidates) {
+    try {
+      pdfUrl.value = await getObjectBlobUrl(candidate)
+      break
+    } catch (e: any) {
+      lastError = e
+    }
   }
+  if (!pdfUrl.value) {
+    pdfError.value = `PDF 加载失败：${lastError?.message ?? '未知错误'}`
+  }
+  pdfLoading.value = false
 }
 
 /**
@@ -544,12 +554,12 @@ onBeforeUnmount(() => {
             :closable="false"
           />
           <PdfViewerMupdf
-            v-else-if="pdfUrl"
+            v-if="pdfUrl"
             ref="pdfViewerRef"
             :src="pdfUrl"
             @scroll="onPdfScroll"
           />
-          <div v-else class="empty">暂无 PDF</div>
+          <div v-else-if="!pdfError" class="empty">暂无 PDF</div>
         </div>
 
         <!-- 翻译：右栏渲染 cn_ 译文 md，与左侧 PDF 按滚动比例联动 -->

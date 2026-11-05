@@ -127,6 +127,21 @@ export function derivePdfKey(mdKey: string): string {
 }
 
 /**
+ * 由普通 PDF key 推导「备份原件」的候选 key 列表（处理流水线会把 X.pdf 换成膨胀版，
+ * 原件改名带后缀，现行后缀为 _sssss，历史遗留 _smallsmall/_s）。
+ * 例：.../X.pdf -> .../X_sssss.pdf、.../X_smallsmall.pdf、.../X_s.pdf。
+ * 视图侧按「主 key 优先、备份件兜底」的顺序逐个尝试。
+ */
+export function deriveBackupPdfKeys(pdfKey: string): string[] {
+  const key = normalizeObjectKey(pdfKey).replace(/\\/g, '/')
+  const dot = key.lastIndexOf('.')
+  // 仅当末尾确为扩展名（.pdf）时才插后缀；无扩展名的 key 直接拼到尾部
+  const stem = dot >= 0 && /\.pdf$/i.test(key.slice(dot)) ? key.slice(0, dot) : key
+  const ext = dot >= 0 && stem !== key ? key.slice(dot) : ''
+  return ['_sssss', '_smallsmall', '_s'].map((suffix) => `${stem}${suffix}${ext}`)
+}
+
+/**
  * 由 md 的 object key 推导「译文 md」的 object key：与原文位于同一目录，
  * 仅在文件名前加前缀（默认 cn_）。例：.../MD/<name>.md -> .../MD/cn_<name>.md
  * 前缀可用 .env 的 VITE_DOC_TRANSLATED_PREFIX 覆盖。
@@ -206,6 +221,21 @@ export async function getObjectBlobUrl(key: string, mime = 'application/pdf'): P
   const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`读取文件失败 HTTP ${res.status}：${objectKey}`)
+  }
+  // 关键：后端「对象不存在 / 权限不足」时并不返回 404，而是 HTTP 200 + JSON 错误体
+  // （Content-Type: application/json，形如 {"code":500,"msg":"文件不存在…"}）。
+  // 真正的文件流是 application/octet-stream。故这里按 Content-Type 识别错误体并抛错，
+  // 让调用方（如 loadPdf 的备份件回退）能把「200 的假成功」当成失败去试下一个候选 key。
+  const ctype = res.headers.get('content-type') || ''
+  if (ctype.includes('application/json')) {
+    const body = await res.text()
+    let msg = body
+    try {
+      msg = JSON.parse(body)?.msg || body
+    } catch {
+      /* 非标准 JSON 就原样带出 */
+    }
+    throw new Error(`读取文件失败：${msg}（${objectKey}）`)
   }
   const buffer = await res.arrayBuffer()
   return URL.createObjectURL(new Blob([buffer], { type: mime }))
