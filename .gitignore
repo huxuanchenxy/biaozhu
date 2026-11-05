@@ -37,3 +37,4 @@ __pycache__/
 /src/workers/log20261030c/*.out
 /src/workers/backup
 /src/workers/delete_logs
+src/workers/orphans.txt

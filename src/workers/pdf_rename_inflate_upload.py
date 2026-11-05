@@ -64,6 +64,14 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   python pdf_rename_inflate_upload.py --files-from bad.txt --apply                 # 名单来自体检报告
   python pdf_rename_inflate_upload.py --files-from "pdf_processed_*.log"           # 名单也支持通配（合并历史几轮）
 
+  # 找「有 _sssss 备份、但主件 X.pdf 不见了」的那批（上一轮败在覆盖前，全目录扫描永远看不见它们）：
+  #   只列一次目录做集合比对，一个 HEAD 都不发、一个字节都不搬，几万个对象也就一两分钟
+  python pdf_rename_inflate_upload.py --orphans-out orphans.txt                    # 只读排查，列完就退出
+  python pdf_rename_inflate_upload.py --files-from orphans.txt                     # 干跑：应逐行报 [dry·补做]
+  python pdf_rename_inflate_upload.py --files-from orphans.txt --apply             # 按名单补做覆盖 X.pdf
+  #   别拿 5.8 万行的历史流水日志直接当名单去 -n 0 定位：那等于逐个名字 HEAD 十万次，
+  #   而里面九成是「已完成」的白探；先 --orphans-out 出精确名单，把定位次数从几万次缩到孤儿那几个。
+
   # 日志：默认每轮都写一份新文件，文件名自动插上本次运行时间戳（启动横幅会打印完整路径）
   python pdf_rename_inflate_upload.py -n 5 --apply                    # → pdf_processed_20261029145550.log
   python pdf_rename_inflate_upload.py -n 5 --apply --log-ts off       # 固定文件名、一直往一份里追加
@@ -1791,6 +1799,39 @@ def resolve_named_targets(client: Minio, prefix: str, entries: list, workers: in
     return pending, misses, dup
 
 
+# ---------------- 孤儿产物（有 sidecar、没主件）：列一次目录就能找全，不必逐个 HEAD ----------------
+
+def find_orphans(keys: list):
+    """从「目录里已有的全部 .pdf 名字」里挑出孤儿产物：X_sssss.pdf 在同层找不到 X.pdf。
+
+       出现形态：上一轮先建好 _sssss、再覆盖 X.pdf 时失败/被中断（也包括被人误删主件），
+       于是桶里只剩原件的副本。这类名字在全目录扫描里天生看不见（扫描按 X.pdf 的名字
+       排队，主件不存在就没有这个队列项），只能靠名单模式补做。
+       历史后缀 _smallsmall/_s 一并查，但分开计数：默认不动它们（需 --refix-legacy）。
+       返回 (孤儿 key 列表, 历史后缀孤儿数, 命中的历史后缀)，key 带 prefix 全路径、按名字排序。"""
+    # 「主件在不在」比对大小写不敏感：S3 对象名区分大小写，X.PDF 与 X_sssss.pdf 并存时若按
+    # 严格名字比，会把它误报成孤儿；而名单模式的补做恰好是拿小写 .pdf 去拼主件 key 的，
+    # 误报会让补做在同一层新建一个 X.pdf、跟原本的 X.PDF 并存。宁可漏报不可误报。
+    names_lower = {k.rsplit("/", 1)[-1].lower() for k in keys}
+    orphans, legacy_n, legacy_sufs = [], 0, set()
+    for k in keys:
+        name = k.rsplit("/", 1)[-1]
+        root = os.path.splitext(name)[0]
+        m = _ARTIFACT_RE.search(root)
+        if not m:
+            continue
+        # 主件只认「不带产物后缀」的那个名字：X_s.pdf 本身也是产物，不能当 X.pdf 存在过的证据
+        if (root[:m.start()] + ".pdf").lower() in names_lower:
+            continue
+        suf = m.group(1).lower()
+        if suf == "_sssss":
+            orphans.append(k)
+        else:
+            legacy_n += 1
+            legacy_sufs.add(suf)
+    return sorted(orphans), legacy_n, sorted(legacy_sufs)
+
+
 # ---------------- 待处理预筛（并发 HEAD，把配额留给真正没处理过的文件） ----------------
 
 def classify_safe(client: Minio, key: str, refix: bool = False, refix_legacy: bool = False,
@@ -2077,6 +2118,10 @@ def main():
     parser.add_argument("--files-from", default=None, nargs="?", const="",
                         help="定向名单文本文件（每行一个名字，# 开头为注释；按当前工作目录解析）；"
                              "只写参数不带值=关闭名单")
+    parser.add_argument("--orphans-out", metavar="名单文件", default=None,
+                        help="只读排查模式：列一次目录，找出「有 _sssss 备份但同层没有 X.pdf」的孤儿"
+                             "（上一轮败在覆盖前），名字写进该文件后直接退出。一个 HEAD 都不发、"
+                             "不处理不写桶（相对路径按当前工作目录解析）；出的名单拿去 --files-from 补做")
     parser.add_argument("--list-cap", type=int, default=0,
                         help="列目录最多收集多少个 PDF 就提前停（0=全量翻页；多机分片须各机设成相同值以保证全集一致）")
     parser.add_argument("--scan-first", action="store_true",
@@ -2129,7 +2174,37 @@ def main():
     if limit < 0:
         parser.error("-n/--limit 不能为负数")
 
+    if args.orphans_out:
+        # 只读排查：列一次目录（翻页）+ 本地集合比对，就找出「只剩 _sssss、主件没覆盖出来」的那批。
+        # 比拿历史流水日志当名单去 -n 0 定位便宜得多：那种跑法是几万个名字逐个 HEAD（每个两次），
+        # 且 resolve_named_targets 要全部探完才出结果，中间不报进度，看着就像卡住。
+        # 这一趟不写处理流水日志（只读排查不该在日志目录里留下一份空流水）。
+        out_arg = args.orphans_out
+        out_path = out_arg if os.path.isabs(out_arg) else os.path.abspath(out_arg)
+        print(f"孤儿排查（只读）：列目录 {prefix} …一个字节都不搬，列完就退出")
+        keys = list_pdfs(endpoint, ak, sk, prefix, quiet=True, max_pdf=0)
+        orph, legacy_n, legacy_sufs = find_orphans(keys)
+        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(os.path.basename(k) for k in orph))
+            f.write("\n" if orph else "")
+        legacy_note = ("；另发现历史后缀孤儿 %d 个（%s，本名单不含它们，默认也不动，"
+                       "要管需 --refix-legacy）" % (legacy_n, "/".join(legacy_sufs))
+                       if legacy_n else "")
+        print("目录里共 %d 个 .pdf（含产物），孤儿备份 %d 个%s" % (len(keys), len(orph), legacy_note))
+        print("名单：%s（%d 行，每行一个 _sssss 名字；--files-from 认这个格式，"
+              "写 X_sssss.pdf 与 X.pdf 算同一个）" % (out_path, len(orph)))
+        for k in orph[:5]:
+            print("  例：%s" % os.path.basename(k))
+        if orph:
+            print('下一步：先干跑看计划（应逐行报 [dry·补做]）——\n'
+                  '  python pdf_rename_inflate_upload.py --endpoint %s --prefix "%s" '
+                  '--files-from %s\n'
+                  '确认无误后加 --apply（建议先 -n 1 落地验一个）'
+                  % (endpoint, prefix, out_arg))
+        return
+
     client = Minio(endpoint, ak, sk, retries=retries, no_cond=args.no_cond)
+
     # 日志名默认插上本次运行时间戳（每轮一份新文件）：这份日志同时是 --files-from 的名单
     # 来源，滚在同一份里会越读越混、分不出哪批是哪一轮做的。
     ts_mode = str(_pick("LOG_TS", args.log_ts, env_name="PDF_LOG_TS") or "on").lower()

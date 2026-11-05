@@ -203,6 +203,35 @@ python pdf_rename_inflate_upload.py --files "bad.pdf" --max-mb 12 -n 0 --apply
 ```bash
 python pdf_rename_inflate_upload.py --files-from refix_pending.txt -n 0 --apply
 ```
+### 补做「有 `_sssss` 却没有 `X.pdf`」的那批（孤儿备份）
+
+上一轮先建好 `X_sssss.pdf`、再覆盖 `X.pdf` 时失败/被中断，桶里就只剩原件的副本。
+这类名字**全目录扫描永远看不见**（扫描是按 `X.pdf` 的名字排队的，主件不存在就没有那个队列项），
+只能走名单模式；名单模式点到一个名字就 HEAD 两次（探 `X.pdf` + 探 `_sssss.pdf`），
+所以**别拿几万行的历史流水日志当名单去 `-n 0` 定位**——那等于几万次 HEAD 白探（九成是「已完成」），
+而且 `--files-from` 定位阶段要全部探完才出结果，中间不报进度，看着就像卡死。
+
+正确姿势：先只读排查一次（列一次目录 + 本地集合比对，一个 HEAD 都不发、一个字节都不搬）：
+
+```bash
+python pdf_rename_inflate_upload.py --endpoint http://10.89.14.234:12001 \
+  --prefix "drivdernet_abc/自筹/9_工业检测数据/9.2_晶体结构_X射线衍射分析数据/成品语料" \
+  --orphans-out orphans.txt          # 只读：把孤儿名字写进 orphans.txt 后就退出，不写日志
+```
+
+再拿这份精确名单去干跑、补做（名单里写 `X_sssss.pdf` 与 `X.pdf` 算同一个文件）：
+
+```bash
+python pdf_rename_inflate_upload.py --endpoint http://10.89.14.234:12001 --prefix "<同上>" \
+  --files-from orphans.txt                        # 干跑：应逐行报 [dry·补做]
+python pdf_rename_inflate_upload.py --endpoint http://10.89.14.234:12001 --prefix "<同上>" \
+  --files-from orphans.txt -n 1 -w 4 --apply      # 先落地验一个
+python pdf_rename_inflate_upload.py --endpoint http://10.89.14.234:12001 --prefix "<同上>" \
+  --files-from orphans.txt -n 0 -w 8 -q --apply   # 全量补做
+```
+
+不需要加 `--refix`：`_sssss` 不会被重写，补做只覆盖主件；补做成功后再跑同一份名单会被判
+「已完成」跳过，重复跑安全。历史后缀（`_smallsmall`/`_s`）的孤儿会被计数报出但不进名单。
 
 ---
 
@@ -215,6 +244,7 @@ python pdf_rename_inflate_upload.py --files-from refix_pending.txt -n 0 --apply
 | `-w 8` | 并发线程数（默认 4） |
 | `--files "A.pdf,B.pdf"` | 定向名单，逗号分隔 |
 | `--files-from 文件` | 从文本读名单（相对路径按当前工作目录解析） |
+| `--orphans-out 文件` | 只读排查：列一次目录找出「有 `_sssss` 无 `X.pdf`」的孤儿，写出名单就退出 |
 | `--refix` | 重做已完成的：从 `_sssss` 取原件重新膨胀覆盖 `X.pdf` |
 | `--refix-only` | 只动有 `_sssss` 备份的，不新建 |
 | `--max-mb 12` | 放宽原件尺寸上限（只为单文件验证；放宽后已膨胀的完成版会被当原件再膨一次） |
