@@ -48,7 +48,10 @@ pdf_delete_sssss.py —— 删掉「已膨胀成功、且成品可用」的 X_ss
   - 连续失败达 --stop-on-error（默认 5）立刻中止，防止凭据或网关异常时乱删
   - Range 请求若被网关回 200（不认区间读）立刻中止：绝不悄悄退化成整份下载打爆流量
   - 非交互终端必须显式 --yes，否则拒绝执行
-  - 全程 UTF-8 日志逐条落盘，成功/失败/跳过都带原因，中断可续（已删的记为「已不存在」）
+  - 中断可续（已删的记为「已不存在」）
+  - 边做边记：开跑前就建好流水日志与成功清单并写表头，每件一完成立刻追加一行并 flush（行内含完成时刻
+    与单件耗时）；失败清单首个失败即落盘。删除不可逆，中途断网/断电/被杀时「已删了哪些」已经在盘上，
+    不靠跑完才出的文件。末尾再补一段汇总（删前/删后计数与释放量）
 
 用法示例：
   # ① 小目录先跑通（干跑，只出预览与名单）
@@ -781,6 +784,70 @@ def write_names(path, names, header):
     return path
 
 
+class RunLog:
+    """执行流水「边做边记」：每件一完成就立刻写进文件并 flush，不攒到整轮结束再写。
+
+       删除是不可逆动作。万一断网、断电、进程被杀，「到底删了哪些、哪些失败、还剩多少」
+       必须已经躺在盘上——否则事后既没法对账，也没法安全续跑。旧版本是整轮跑完才由 finish()
+       一次性写三份文件，中途出事就一份都没落下来，跟「__main__」那句「已完成的都记在日志里」
+       的承诺正好相反。所以三份文件改成开跑前就创建、写好表头，之后逐行追加：
+         · log_path   逐行「状态  完成时刻  单件耗时  完整key  原因」，可 grep 可人工回溯；
+         · ok_path    每行一个成功对象的完整 key（增量写，能直接喂回 --force-from）；
+         · fail_path  失败对象的 key + 原因（首个失败时才建；失败项没被动过，排查后可重跑）。
+       close() 再往 log 追加一段汇总（删前/删后计数、释放量）。
+    """
+
+    def __init__(self, log_path, ok_path, fail_path, action, total, extra_header=()):
+        self.log_path = log_path
+        self.ok_path = ok_path
+        self.fail_path = fail_path
+        self.deleting = (action == "删除")
+        self.freed = 0
+        self.counts = {"ok": 0, "fail": 0, "skip": 0}
+        self._log = io.open(log_path, "w", encoding="utf-8", newline="\n")
+        self._ok = io.open(ok_path, "w", encoding="utf-8", newline="\n")
+        self._fail = None
+        self._log.write(u"# %s流水日志（边做边记：每件完成即落盘，中途断了也已写好的都在）\n" % action)
+        self._log.write(u"# 开始 %s　本轮目标 %d 个\n" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"), total))
+        for h in extra_header:
+            self._log.write(u"# %s\n" % h)
+        self._log.flush()
+        self._ok.write(u"# %s成功的对象（完整 key，不含桶名），边做边写，本轮目标 %d 个\n"
+                       % (action, total))
+        self._ok.flush()
+
+    def record(self, st, key, msg, dur=0.0, size=0):
+        """把一件的结果立刻落盘。st ∈ ok/fail/skip；key 为完整对象路径；dur 为单件耗时（秒）。"""
+        self.counts[st] = self.counts.get(st, 0) + 1
+        self._log.write(u"%s\t%s\t%.2fs\t%s\t%s\n" % (
+            st.upper(), time.strftime("%Y-%m-%d %H:%M:%S"), dur, key, msg))
+        self._log.flush()
+        if st == "ok":
+            self._ok.write(key + u"\n")
+            self._ok.flush()
+            if self.deleting:
+                self.freed += int(size or 0)
+        elif st == "fail":
+            if self._fail is None:
+                self._fail = io.open(self.fail_path, "w", encoding="utf-8", newline="\n")
+                self._fail.write(u"# 失败清单：key\t原因。失败项没被动过，排查后可重跑\n")
+            self._fail.write(u"%s\t%s\n" % (key, msg))
+            self._fail.flush()
+
+    def close(self, summary_lines):
+        self._log.write(u"# ---- 汇总 ----\n")
+        for s in summary_lines:
+            self._log.write(s + u"\n")
+        self._log.flush()
+        self._log.close()
+        self._ok.write(u"# 实际成功 %d 行\n" % self.counts.get("ok", 0))
+        self._ok.flush()
+        self._ok.close()
+        if self._fail:
+            self._fail.close()
+
+
 # ---------------- 点名强删：名单 → 候选（只做归一，绝不凭名字拼 key） ----------------
 
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{3,}$")
@@ -1217,10 +1284,19 @@ def main():
 
     # ---- [5/5] 执行：COPY → 核对副本 → DELETE → 确认消失 ----
     print("\n[5/5] 开始执行…")
-    ok_rows, fail_rows, skip_rows = [], [], []
-    backup_rows = []      # --backup-local：(桶内 key, 本地路径, 体积, md5)
-    freed_real = [0]
+    backup_rows = []      # --backup-local：(桶内 key, 本地路径，体积，md5)
     size_map = dict((c[0], int(c[1] or 0)) for c in will)   # 预先建索引，不随候选数线性重算
+    n_before = len(will)      # 删前计数（写进汇总跟删后对比）
+    # 三份文件开跑前就建好、写表头，之后每件一完成逐行追加+flush（见 RunLog）：
+    #   删除不可逆，中途断网/断电/被杀时「已删了哪些」必须已经在盘上，才对账得上。
+    w = RunLog(log_path,
+               os.path.join(out_dir, "deleted_ok_keys_%s.txt" % ts),
+               os.path.join(out_dir, "delete_failed_%s.tsv" % ts),
+               "删除", n_before,
+               ["回收站：%s　本地留底：%s" % (
+                   "已关闭（无桶内副本）" if (args.no_trash or backup_root) else trash,
+                   backup_root or "无"),
+                "删前待删 %d 个；逐件记录状态/完成时刻/单件耗时/完整key/原因" % n_before])
 
     def step(item):
         key, size, etag, ikey, isize, ietag = item
@@ -1326,30 +1402,36 @@ def main():
         return ("ok", key, "已删（释放 %s；膨胀版 %s 在位%s）"
                 % (human_size(size), os.path.basename(ikey), tail))
 
+    def timed(it):
+        """跑一件并量它的墙上耗时（秒）。step 内部已把网络/权限异常都转成 ('fail', …)，
+           这里只负责给它包一层计时，好让“每件多久”能落到日志里。"""
+        t = time.time()
+        r = step(it)
+        return (r, time.time() - t)
+
     try:
         items = will
         if args.jobs <= 1 or ThreadPoolExecutor is None:
             # 单线程也必须走同一套计数与闸口：不然删完了统计还是 0，看着像没删（比报错更坑）
-            res = []
             for it in items:
-                r = step(it)
+                r, dur = timed(it)
                 if r is None:
                     break
-                res.append(r)
+                w.record(r[0], r[1], r[2], dur, size_map.get(r[1], 0))
                 tally(r[0], size_map.get(r[1], 0))
                 if args.stop_on_error and _run["consec"] >= args.stop_on_error:
                     print("\n      连续 %d 个失败，先停手（剩下的没动，原因见日志）" % _run["consec"])
                     _abort.set()
                     break
         else:
-            res = []
             with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 16))) as ex:
-                futs = [ex.submit(step, it) for it in items]
+                futs = [ex.submit(timed, it) for it in items]
                 for i, f in enumerate(as_completed(futs)):
-                    r = f.result()
+                    r, dur = f.result()
                     if r is None:
                         break
-                    res.append(r)
+                    # 逐行落盘：as_completed 在主线程串行消费，文件写入不会交错
+                    w.record(r[0], r[1], r[2], dur, size_map.get(r[1], 0))
                     with _lock:
                         tally(r[0], size_map.get(r[1], 0))
                         if args.stop_on_error and _run["consec"] >= args.stop_on_error:
@@ -1363,12 +1445,9 @@ def main():
                                  _run["ok"], _run["skip"], _run["fail"]))
     except KeyboardInterrupt:
         _abort.set()
-        print("\n中断：本轮已处理 %s 个就停了，剩下的没动。重跑会自动接着（已删的记为跳过）。"
+        print("\n中断：本轮已处理 %s 个就停了，剩下的没动（已记的每件都已在盘上）。"
+              "重跑会自动接着（已删的记为跳过）。"
               % format(_run["ok"] + _run["skip"] + _run["fail"], ","))
-    for st, key, msg in res:
-        (ok_rows if st == "ok" else fail_rows if st == "fail" else skip_rows).append((key, msg))
-        if st == "ok":
-            freed_real[0] += size_map.get(key, 0)
     # 本地留底清单：事后要知道“哪个 key 在磁盘哪个位置、MD5 是多少”，
     # 不写这份就等于“底是有的，但没人说得清在不在”。
     if backup_rows:
@@ -1378,8 +1457,8 @@ def main():
                          "真到那步把整个目录交给运维即可"],
                         backup_rows)
         print("  本地留底清单：%s（%s 件）" % (bp, format(len(backup_rows), ",")))
-    finish(log_path, ok_rows, fail_rows, skip_rows, _run, freed_real[0], len(copies),
-           len(no_infl), len(small), "删除", trash, args.no_trash, backup_root)
+    finish(w, _run, len(copies), len(no_infl), len(small), "删除", trash,
+           args.no_trash, backup_root, n_before)
 
 
 def tally(st, size):
@@ -1395,63 +1474,56 @@ def tally(st, size):
         _run["consec"] += 1
 
 
-def finish(log_path, ok_rows, fail_rows, skip_rows, run, freed, n_copies, n_pending,
-           n_small, action, trash, no_trash, backup_root=None):
-    """日志写全：成功、失败、跳过都带原因与文件名（三个名单都是 (key, msg) 二元组），
-       末尾一段汇总与回滚指引。行格式：状态\tkey\t原因，方便直接 grep FAIL。"""
+def finish(w, run, n_copies, n_pending, n_small, action, trash, no_trash,
+           backup_root=None, n_before=None):
+    """收尾：往逐件流水日志末尾追加一段汇总（正文已由 RunLog 在跑的过程中边做边记），
+       再打印回滚指引。不再在这里重建日志/成功清单/失败清单——那些从开跑第一件起就在盘上了。"""
     deleting = action == "删除"
-    with io.open(log_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("# %s%s 流水日志\n" % (action, time.strftime(" @ %Y-%m-%d %H:%M:%S")))
-        for key, msg in ok_rows:
-            f.write("OK\t%s\t%s\n" % (key, msg))
-        for key, msg in fail_rows:
-            f.write("FAIL\t%s\t%s\n" % (key, msg))
-        for key, msg in skip_rows:
-            f.write("SKIP\t%s\t%s\n" % (key, msg))
-        f.write("# ---- 汇总 ----\n")
-        f.write("# 成功 %d，跳过 %d，失败 %d，%s\n"
-                % (run["ok"], run["skip"], run["fail"],
-                   ("实际释放 %s" % human_size(freed)) if deleting
-                   else ("本轮处理 %d 个" % n_copies)))
-        if deleting:
-            f.write("# 同层无膨胀版（没动过）%d；膨胀版体积不足（没动过）%d\n"
-                    % (n_pending, n_small))
-        f.write("# 回收站：%s%s\n" % ("已关闭（无桶内副本）" if (no_trash or backup_root) else trash,
-                                       "；本地留底：%s" % backup_root if backup_root else ""))
-    out_dir = os.path.dirname(log_path)
-    ts = re.search(r"(\d{14})", os.path.basename(log_path))
-    ts = ts.group(1) if ts else time.strftime("%Y%m%d%H%M%S")
-    ok_p = write_names(os.path.join(out_dir, "%s_keys_%s.txt" % (
-        "deleted_ok" if deleting else "restored_ok", ts)),
-                       [k for k, m in ok_rows],
-                       ["%s成功的对象（完整 key，不含桶名）。共 %d 行" % (action, len(ok_rows))])
-    fail_p = write_rows(os.path.join(out_dir, "%s_failed_%s.tsv" % (
-        "delete" if deleting else "restore", ts)),
-        ["失败清单：key 原因。失败项没被动过，排查后可重跑"],
-        [(k, m) for k, m in fail_rows]) if fail_rows else None
+    freed = w.freed
+    ok_n, fail_n, skip_n = run["ok"], run["fail"], run["skip"]
+    summary = [
+        "# 成功 %d，跳过 %d，失败 %d，%s" % (
+            ok_n, skip_n, fail_n,
+            ("实际释放 %s" % human_size(freed)) if deleting
+            else ("本轮处理 %d 个" % n_copies)),
+    ]
+    if deleting and n_before is not None:
+        # 删前/删后计数：剩下没删成的 = 跳过 + 失败 + 停手时还没轮到的（n_before-ok_n）
+        summary.append("# 删前待删 %d，本轮删成 %d，未删成 %d（含跳过 %d／失败 %d／停手没动的）"
+                       % (n_before, ok_n, n_before - ok_n, skip_n, fail_n))
+    if deleting:
+        summary.append("# 同层无膨胀版（没动过）%d；膨胀版体积不足（没动过）%d"
+                       % (n_pending, n_small))
+    summary.append("# 回收站：%s%s" % (
+        "已关闭（无桶内副本）" if (no_trash or backup_root) else trash,
+        "；本地留底：%s" % backup_root if backup_root else ""))
+    summary.append("# 结束 %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    w.close(summary)
+
     print("\n结果：成功 %s 个%s；跳过 %s；失败 %s"
-          % (format(run["ok"], ","),
+          % (format(ok_n, ","),
              "（释放 %s）" % human_size(freed) if deleting else "",
-             run["skip"], run["fail"]))
-    print("  完整日志：%s（每行一条，含成功/失败/跳过与原因）" % log_path)
-    print("  成功清单：%s%s" % (ok_p, "；失败清单：%s" % fail_p if fail_p else ""))
-    if run["ok"] and deleting and backup_root:
+             skip_n, fail_n))
+    print("  完整日志：%s（每件一行：状态/完成时刻/单件耗时/完整key/原因，边做边记）" % w.log_path)
+    print("  成功清单：%s（边做边写）%s" % (w.ok_path,
+          "；失败清单：%s" % w.fail_path if fail_n else ""))
+    if ok_n and deleting and backup_root:
         print("  ↩ 本轮 %s 件的底在本地：%s（桶里没有副本，别用 --restore；"
               "逐件路径与 MD5 见 backup_manifest_*.tsv）"
-              % (format(run["ok"], ","), backup_root))
-    elif run["ok"] and deleting and no_trash:
+              % (format(ok_n, ","), backup_root))
+    elif ok_n and deleting and no_trash:
         # --no-trash 下根本没有副本，这句指引要是照旧印“想反悔：--restore …”
         # 就是给人一个假希望：--restore 靠把副本复制回原位，而本轮压根没复制过。
         print("  ⚠ 本轮是 --no-trash：桶里没留下任何副本（%s 里也没有）—— "
               "别指望 --restore：它要把副本复制回原位，而本轮压根没复制过。"
               "要恢复只能从别处重新拿到原件本身" % trash)
-    elif run["ok"] and deleting:
+    elif ok_n and deleting:
         print("  想反悔：%s --restore --trash-prefix \"%s\" --apply"
               % (os.path.basename(__file__), trash))
-    elif run["ok"]:
+    elif ok_n:
         print("  回收站里的副本一份没删（避免搬两次丢两件）；确认新址无误后，可让运维整段清 %s"
               % trash)
-    if run["fail"]:
+    if fail_n:
         print("  有失败项：先看失败清单再重跑，别连着猛试 —— 连续失败通常是凭据、权限或网关在出问题")
 
 
@@ -1485,8 +1557,6 @@ def run_restore(client, args, trash, key_prefix, out_dir, log_path, quiet, vers)
     gate(args.apply, args.yes, ["\n再次确认：即将向 %s 复制回去 %s 个对象（版本控制：%s）。"
                                 % (key_prefix, format(len(todo), ","), vers)], action="恢复")
 
-    done = []
-
     def step(item):
         tk, size, etag, orig = item
         if _abort.is_set():
@@ -1512,34 +1582,47 @@ def run_restore(client, args, trash, key_prefix, out_dir, log_path, quiet, vers)
             return ("fail", orig, "复制后大小不对（%s≠%s）" % (s2, size))
         return ("ok", orig, "已恢复到原位（回收站副本仍留在 %s）" % tk)
 
-    if args.jobs <= 1 or ThreadPoolExecutor is None:
-        res = []
-        for it in todo:
-            r = step(it)
-            if r is None:
-                break
-            res.append(r)
-            tally(r[0], 0)
-            if args.stop_on_error and _run["consec"] >= args.stop_on_error:
-                _abort.set()
-                break
-    else:
-        res = []
-        with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 16))) as ex:
-            for i, f in enumerate(as_completed([ex.submit(step, it) for it in todo])):
-                r = f.result()
+    # 与删除同样边做边记：恢复也可能中途断，三份文件开跑前就建好、逐行追加。
+    ts = (re.search(r"(\d{14})", os.path.basename(log_path)) or
+          [None, time.strftime("%Y%m%d%H%M%S")])[1]
+    w = RunLog(log_path,
+               os.path.join(out_dir, "restored_ok_keys_%s.txt" % ts),
+               os.path.join(out_dir, "restore_failed_%s.tsv" % ts),
+               "恢复", len(todo),
+               ["回收站：%s（恢复只把原件复制回原位，不动回收站副本）" % trash])
+
+    def timed(it):
+        t = time.time()
+        r = step(it)
+        return (r, time.time() - t)
+
+    try:
+        if args.jobs <= 1 or ThreadPoolExecutor is None:
+            for it in todo:
+                r, dur = timed(it)
                 if r is None:
                     break
-                res.append(r)
+                w.record(r[0], r[1], r[2], dur)
                 tally(r[0], 0)
                 if args.stop_on_error and _run["consec"] >= args.stop_on_error:
                     _abort.set()
                     break
-    ok_rows = [(k, m) for st, k, m in res if st == "ok"]
-    fail_rows = [(k, m) for st, k, m in res if st == "fail"]
-    skip_rows = [(k, m) for st, k, m in res if st == "skip"]
-    finish(log_path, ok_rows, fail_rows, skip_rows, _run, 0, len(todo), 0, 0,
-           "恢复", trash, False)
+        else:
+            with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 16))) as ex:
+                for i, f in enumerate(as_completed([ex.submit(timed, it) for it in todo])):
+                    r, dur = f.result()
+                    if r is None:
+                        break
+                    w.record(r[0], r[1], r[2], dur)
+                    tally(r[0], 0)
+                    if args.stop_on_error and _run["consec"] >= args.stop_on_error:
+                        _abort.set()
+                        break
+    except KeyboardInterrupt:
+        _abort.set()
+        print("\n中断：本轮已处理 %s 个就停了（已记的每件都已在盘上），剩下的没动。"
+              % format(_run["ok"] + _run["skip"] + _run["fail"], ","))
+    finish(w, _run, len(todo), 0, 0, "恢复", trash, False)
 
 
 if __name__ == "__main__":
