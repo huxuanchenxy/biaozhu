@@ -30,6 +30,8 @@ pdf_delete_sssss.py —— 删掉「已膨胀成功、且成品可用」的 X_ss
 安全边界（本脚本会真删对象，下面每一条都是拦着用的）：
   - 默认 DRY-RUN：不带 --apply 绝不动桶
   - 回收站优先：COPY 失败或副本核对不上 → 该件一律不删；--no-trash 要额外确认才能跳过
+  - 本地留底优先（--backup-local）：原件先 GET 到本地、比过体积与 MD5 才删，留底失败那一件就不删；
+    桶不让你 PutObject（建不了回收站、--restore 也用不了）时，这是唯一走得通的底
   - 白名单：只删「<名字>_sssss.pdf」形态的 key；膨胀版本体、.md、.json、历史后缀都不进候选
   - 后缀太短（如 _s）直接拒绝：无法与「恰好叫 X_s.pdf 的真实文档」区分，删除不接受这种歧义
   - 只列一层（delimiter='/'）：子目录里的东西一律不碰，宁可不删
@@ -37,7 +39,12 @@ pdf_delete_sssss.py —— 删掉「已膨胀成功、且成品可用」的 X_ss
   - 回收站前缀本身排除在候选之外，避免把自己复制进去的件再删一遍
   - 体积门槛：膨胀版 < --min-inflated（默认 5MiB，与处理脚本 _BIG 同口径）判「疑似半成品」不删
   - 校验拿不准（可疑/异常）一律不删，进隔离清单，绝不猜
-  - 删除前 HEAD 复核大小与 ETag：预览之后对象被人动过就停手
+  - 点名强删（--force-from）只在三个硬条件下放行：只从本轮已扫出的候选里按名字挑（绝不按名单拼 key 去删）、
+    删的仍是 <名字>_sssss.pdf 备份件、照旧先复制进回收站再删；名单里有任何一个名字对不上候选，
+    就拒绝 --apply（对不上通常是 --prefix 写错或名单来自别的目录，这种情况不能照剩下的删）
+  - 删除前 HEAD 复核大小与 ETag：预览之后**原件备份**被人动过就停手
+  - 删除前再核一次**膨胀版本体**：不在了、或体积/ETag 与预览时不符（被人换过一份）都不删
+    —— 强删件尤其靠这条：它唯一的兜底就是「成品仍是我预览时看过的那一份」
   - 连续失败达 --stop-on-error（默认 5）立刻中止，防止凭据或网关异常时乱删
   - Range 请求若被网关回 200（不认区间读）立刻中止：绝不悄悄退化成整份下载打爆流量
   - 非交互终端必须显式 --yes，否则拒绝执行
@@ -59,6 +66,15 @@ pdf_delete_sssss.py —— 删掉「已膨胀成功、且成品可用」的 X_ss
   # ⑤ 大目录只数数量、不校验不删
   python pdf_delete_sssss.py --endpoint ... --prefix "..." --verify size --max-list 200000
 
+  # ⑥ 隔离件不打算修了，点名强删（名单直接吃本脚本自己的 quarantine_*.txt / to_delete_*.tsv）
+  #   先不带 --apply 干跑，看「名单命中几个」对不对数；对上了再加 --apply
+  python pdf_delete_sssss.py --endpoint ... --prefix "..." --force-from "delete_logs/.../quarantine_xxx.txt"
+  python pdf_delete_sssss.py --endpoint ... --prefix "..." --force-from ".../quarantine_xxx.txt" --apply
+
+  # ⑦ 往桶里写不进去（PutObject 被拒 → 建不了回收站、--restore 也用不了）：删前先落本地底
+  #   开了它就自动跳过桶内 COPY；每件比过体积与 MD5 才删，另存 backup_manifest_*.tsv 记底
+  python pdf_delete_sssss.py --endpoint ... --prefix "..." --backup-local "D:/备份/sssss留底" --apply
+
   凭据：--access-key/--secret-key 或环境变量 MINIO_ACCESS_KEY/MINIO_SECRET_KEY 或同目录 .env
   兼容性：Python 3.6+，零第三方依赖（PyMuPDF 仅在 --verify full 时需要）；Windows/Linux 皆可
 """
@@ -70,6 +86,7 @@ import hmac
 import io
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -345,6 +362,40 @@ class S3(object):
         r.close()
         return data
 
+    def get_to_file(self, key, path, chunk=1 << 20):
+        """流式下载到本地（备份件里有几百兆的，不能整份读进内存）。
+           先写 .part 再改名：中途挂了不能留下一个“看着像备份成功”的半截文件；
+           边写边算 MD5，不用为了核对再读一遍。返回 (字节数, md5)。"""
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        tmp = path + ".part"
+        h = hashlib.md5()
+        size = 0
+        r = self._call("GET", key)
+        try:
+            with io.open(tmp, "wb") as f:
+                while True:
+                    buf = r.read(chunk)
+                    if not buf:
+                        break
+                    size += len(buf)
+                    h.update(buf)
+                    f.write(buf)
+        except Exception:
+            try:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        finally:
+            r.close()
+        if os.path.exists(path):
+            os.remove(path)          # 新件已下完并验过尺寸才换掉旧名
+        os.rename(tmp, path)
+        return size, h.hexdigest()
+
     def copy(self, src_key, dst_key):
         """同桶复制。x-amz-copy-source 进签名，避免未签头被网关挑刺。"""
         source = "/%s/%s" % (self.bucket, strict_encode_path(src_key))
@@ -464,6 +515,83 @@ def hb_scan(quiet, scanned, n_copy, prefixes, pages, t0, suffixes, force=False):
         else:
             sys.stderr.write("\r" + cut + " " * max(0, 110 - len(cut)))
         sys.stderr.flush()
+
+
+# ---------------- 预览后到真删前：成品有没有被人换掉 ----------------
+
+def etag_short(etag):
+    """报错信息里用简短 ETag，免得整串哈希涌屏"""
+    s = str(etag or "").strip('"')
+    return (s[:8] + "…") if len(s) > 12 else (s or "无")
+
+
+def partner_drift(size_then, etag_then, size_now, etag_now):
+    """预览之后，膨胀版（成品 X.pdf）是不是已经被人家换过一份。
+
+       体积对不上、或两边都有 ETag 且不相等 → 算变了。ETag 这里**不**做额外归一
+       （引号、分片后缀之类），与原件那道复核保持完全口径：宁可把「没变」误判成
+       「变了」而少删一个，也不能反过来把真换掉的当成没换 —— 后者删掉的就是唯一
+       凭据。不额外发请求：用的是「成品还在吗」那次 HEAD 已有的返回值。
+
+       体积读不成数（垃圾值）也当变了 —— 拿不准就不删。"""
+    try:
+        if int(size_then) != int(size_now):
+            return True
+    except (TypeError, ValueError):
+        return True
+    if etag_then and etag_now and str(etag_then).strip('"') != str(etag_now).strip('"'):
+        return True
+    return False
+
+
+# ---------------- 本地备份（--backup-local）：写不进桶时唯一的底 ----------------
+
+def _safe_segment(seg, limit=150):
+    """把 key 里不能当文件名的字符换成 _，名字过长时截短并挂哈希后缀。
+
+       消毒不是可选项：桶里真有名字带 `:` 、`;` 的标准件（如 ISO_TR 52022-2-2017;fr_5772.pdf），
+       在 Windows 上直接写不出去；而“备份失败”比“没备份”更坑 —— 它会让人以为有底。"""
+    s = re.sub(r'[<>:"|?*\\/\x00-\x1f]', "_", str(seg)).strip().rstrip(".") or "_"
+    if len(s) > limit:
+        stem, ext = os.path.splitext(s)
+        s = "%s_~%s%s" % (stem[:limit - 20], hashlib.md5(s.encode("utf-8")).hexdigest()[:8], ext)
+    return s
+
+
+def local_path_for(root, key):
+    """备份落点：<root>/<整个 key 路径>，逐段消毒。
+
+       用整个 key 而不是 basename：同一个备份根要给 6.1 / 7.1 / 9.3 共用，
+       只留文件名迟早会互相盖名 —— 盖掉的就是「以为有底、其实没了」。"""
+    parts = [_safe_segment(x) for x in str(key).strip("/").split("/") if x]
+    return os.path.join(root, *parts) if parts else os.path.join(root, "_")
+
+
+def etag_is_plain_md5(etag):
+    """单次 PUT 的 ETag 就是 MD5 十六进制；分片上传形如 "hash-2"，那种不能直接比。"""
+    return bool(re.match(r"^[0-9a-fA-F]{32}$", str(etag or "").strip('"')))
+
+
+def check_backup(path, size, etag):
+    """核对已有的本地备份：存在 + 体积对 +（ETag 是 MD5 形态时）摘要对。
+       返回 (可用?, 实际字节, md5, 说明)。拿不准一律判不可用 —— 备份是删除前唯一的底。"""
+    if not os.path.isfile(path):
+        return False, 0, "", "本地没有备份文件"
+    try:
+        actual = os.path.getsize(path)
+    except OSError as e:
+        return False, 0, "", "读本地文件失败：%s" % e
+    if size and actual != int(size):
+        return False, actual, "", "本地体积 %s ≠ 桶内体积 %s" % (actual, size)
+    h = hashlib.md5()
+    with io.open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    md5 = h.hexdigest()
+    if etag_is_plain_md5(etag) and md5 != str(etag).strip('"').lower():
+        return False, actual, md5, "本地 MD5 %s ≠ 桶内 ETag %s" % (md5, str(etag).strip('"'))
+    return True, actual, md5, ("一致" if etag_is_plain_md5(etag)
+                               else "体积一致（ETag 非 MD5 形态，未比摘要）")
 
 
 # ---------------- 校验：判「X.pdf 能不能当成品」----------------
@@ -653,6 +781,82 @@ def write_names(path, names, header):
     return path
 
 
+# ---------------- 点名强删：名单 → 候选（只做归一，绝不凭名字拼 key） ----------------
+
+_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{3,}$")
+
+
+def canon_pdf_name(name, suffixes):
+    """把名单里的一个写法归一成「成品名 X.pdf」（小写、不带目录）。
+
+       为什么拿成品名当准绳而不是备份件名：本脚本自己的 quarantine 名单里写的就是**成品名**
+       （那行取的是 basename(膨胀版key)），而要删的对象却是 X_ssssss.pdf。这两个名字一旦混用，
+       「按名单删」就会删到语料本体。所以这里只做一个方向的归一：带 _sssss 的把后缀剥掉，
+       不带的原样收下，**绝不反过来给成品名加后缀去凑 key** —— 凑出来的 key 一旦不存在或
+       指向另一个对象，代价是永久的。真删时用的仍是候选元组里那个扫出来的 key。"""
+    n = os.path.basename(str(name).strip().strip("\"'\ufeff").replace("\\", "/")).lower()
+    if not n:
+        return ""
+    if n.endswith(".pdf"):
+        stem = n[:-4]
+        for suf in suffixes:
+            s = str(suf).lower()
+            if s and stem.endswith(s) and len(stem) > len(s):
+                return stem[:-len(s)] + ".pdf"
+    return n
+
+
+def load_force_names(path, suffixes):
+    """读「点名强删」名单。形式宽容，但结果只有两种：一个成品名，或者跳过（不猜）：
+         # 开头 / 空行            → 跳过（本脚本出的名单都带 # 表头）
+         含制表符的整行        → 取第一个以 .pdf 结尾的字段（自家 to_delete_*.tsv 能直接吃）
+         「名字 → 码（说明）」  → 取箭头前那段（quarantine_*.txt 就是这个格式；要求箭头后
+                             紧跟一个全大写校验码才这么切，免得把名字里自带箭头的文件截错）
+         其余                  → 整行当名字（可带目录前缀，取 basename）"""
+    want = set()
+    with io.open(path, encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            line = line.strip().strip("\ufeff").strip()
+            if not line or line.startswith("#"):
+                continue
+            if "\t" in line:
+                fld = [x.strip() for x in line.split("\t") if x.strip().lower().endswith(".pdf")]
+                if not fld:
+                    continue
+                line = fld[0]
+            elif "\u2192" in line:
+                head, _, tail = line.rpartition("\u2192")
+                code = tail.strip().split("\uff08", 1)[0].split(" ", 1)[0].strip()
+                if head.strip().lower().endswith(".pdf") and _CODE_RE.match(code):
+                    line = head.strip()
+            nm = canon_pdf_name(line, suffixes)
+            if nm:
+                want.add(nm)
+    return want
+
+
+def pick_forced(force_want, keep, susp, quar, suffixes):
+    """名单 → (放行项, 未命中名单)。只在已扫出的候选里按成品名比，绝不凭名字拼 key。
+
+       keep 里的名字也算「命中」（那些本来就要删），这样同一份 to_delete.tsv 喂进来
+       不会因为「全都已在校验通过里」而被误判成名单对不上。
+       返回的放行项仍是完整候选元组，调用方按 it[0]（<名字>_sssss.pdf）去删。
+
+       force_want 进来还会再归一一次：正常调用方（load_force_names）已经归一过了，
+       多归一次是幂等的；但不归的话，将来哪个调用方直接塞原始名字就会静默变成
+       「全未命中」——那只会让 --apply 拒掉，不会删错东西，但报错原因会很难看。"""
+    want = set(canon_pdf_name(x, suffixes) for x in force_want)
+    want.discard("")
+    hit = set(canon_pdf_name(os.path.basename(it[3]), suffixes) for it in keep)
+    forced = []
+    for it in susp + quar:
+        nm = canon_pdf_name(os.path.basename(it[3]), suffixes)
+        if nm in want:
+            forced.append(it)
+            hit.add(nm)
+    return forced, sorted(want - hit)
+
+
 # ---------------- 删除主流程 ----------------
 
 def main():
@@ -675,10 +879,22 @@ def main():
     ap.add_argument("-n", "--limit", type=int, default=0, help="本轮最多处理几个候选（0=不限）")
     ap.add_argument("--max-list", type=int, default=0,
                     help="最多列多少个对象就停（摸底用；停过就拒绝 --apply）")
-    ap.add_argument("--only-keys-file", help="只处理这份名单里的名字（兼容备份脚本的 deletable_keys.txt）")
+    ap.add_argument("--only-keys-file",
+                    help="只处理这份名单里的名字（兼容备份脚本的 deletable_keys.txt；"
+                         "名单里写的必须是备份件名 X_sssss.pdf。本脚本自己的 quarantine_*.txt 写的是"
+                         "成品名，那种名单请用 --force-from）")
+    ap.add_argument("--force-from", metavar="名单文件",
+                    help="点名强删：名单里那些「校验没过、本应隔离」的备份件也放行删除。"
+                         "本脚本自己的 quarantine_*.txt / to_delete_*.tsv 可直接喂（每行一个名字也行）。"
+                         "它只从本轮已扫出的候选里按名字挑、删的仍是 <名字>_sssss.pdf、照旧先复制进"
+                         "回收站；名单里有任何一个名字对不上候选就拒绝 --apply")
     ap.add_argument("--trash-prefix", help="回收站前缀（默认 <本目录>/%s/<今天>/）" % CONFIG["TRASH_DIR"])
     ap.add_argument("--no-trash", action="store_true",
                     help="不复制进回收站、直接删（桶开不了版本控制时这是不可逆操作，需额外确认）")
+    ap.add_argument("--backup-local", metavar="目录",
+                    help="删前先把原件 GET 到这个目录留底（逐件比过体积与 MD5 才删，对不上就不删）。"
+                         "桶不让你 PutObject（建不了回收站、--restore 也用不了）时靠它兜底；"
+                         "开了它就自动跳过桶内复制")
     ap.add_argument("-j", "--jobs", type=int, default=CONFIG["JOBS"], help="并发数（默认 4，写操作别开太大）")
     ap.add_argument("--stop-on-error", type=int, default=CONFIG["STOP_ON_ERROR"],
                     help="连续失败达到这个数就中止（默认 5，0=不中止）")
@@ -714,7 +930,26 @@ def main():
         if len(s) <= 2:
             sys.exit("错误：后缀 %r 太短，删除不接受这种歧义（无法区分「恰好叫 X%s.pdf 的真实文档」）"
                      % (s, s))
+    force_want = None
+    if args.force_from:
+        if not os.path.isfile(args.force_from):
+            sys.exit("错误：--force-from 名单文件不存在：%s（路径按当前工作目录解析，"
+                     "必要时写绝对路径）" % args.force_from)
+        force_want = load_force_names(args.force_from, suffixes)
+        if not force_want:
+            sys.exit("错误：--force-from 名单里没解析出任何一个名字：%s（只认本脚本出的 "
+                     "quarantine_*.txt / to_delete_*.tsv，或每行一个 PDF 名字的纯名单）"
+                     % args.force_from)
+        print("  点名强删名单：%s 个名字（来自 %s）"
+              % (format(len(force_want), ","), os.path.basename(args.force_from)))
     quiet = bool(args.quiet) or not sys.stdout.isatty()
+    if args.only_keys_file:
+        # 这个检查必须在列目录之前做：以前它拖到 [2/5] 才读文件，名单路径写错时
+        # 白白扫完整个目录，然后抛一个裸 traceback（FileNotFoundError）——
+        # 看不出是名单写错了，也很容易误判成脚本挂了。
+        if not os.path.isfile(args.only_keys_file):
+            sys.exit("错误：--only-keys-file 名单文件不存在：%s（路径按当前工作目录解析，"
+                     "必要时写绝对路径）" % args.only_keys_file)
 
     day = time.strftime("%Y%m%d")
     trash = (args.trash_prefix or trash_prefix_for(key_prefix, day, CONFIG["TRASH_DIR"])).strip("/") + "/"
@@ -729,6 +964,20 @@ def main():
     log_path = os.path.join(out_dir, ("pdf_restore_%s_%s.log" if args.restore
                                       else "pdf_delete_%s_%s.log") % (slug, ts))
     min_bytes = max(0, int(args.min_inflated)) * 1024 * 1024
+    # 本地留底：往桶里写被拒时唯一走得通的反悔依据（只发 GET，不写桶）。
+    backup_root = (args.backup_local or "").strip().strip('"') or None
+    if backup_root and args.restore:
+        sys.exit("错误：--backup-local 是「删前把原件 GET 到本地」，--restore 是「从回收站复制回桶里」，"
+                 "两者不是一回事，不要一起用")
+    if backup_root:
+        backup_root = os.path.abspath(backup_root)
+        try:
+            if not os.path.isdir(backup_root):
+                os.makedirs(backup_root)
+        except OSError as e:
+            sys.exit("错误：--backup-local 目录建不出来：%s（%s）" % (backup_root, e))
+        if not os.access(backup_root, os.W_OK):
+            sys.exit("错误：--backup-local 目录不可写：%s" % backup_root)
 
     print("连接：%s（AK=%s****%s）" % (
         endpoint, ak[:4],
@@ -741,6 +990,9 @@ def main():
                                        "【真动手 APPLY】" if args.apply else "【干跑：绝不写桶】"))
     if args.restore:
         print("回收站：%s（恢复只把原件复制回原位，不动回收站里的副本）" % trash)
+    elif args.backup_local:
+        print("本地留底：%s（每件先 GET 到本地、比过体积与 MD5 才删；桶内回收站因此跳过）"
+              % os.path.abspath(args.backup_local))
     elif args.no_trash:
         print("⚠ --no-trash：不复制进回收站，直接删 —— 桶开不了版本控制，删掉就找不回来")
     else:
@@ -849,16 +1101,55 @@ def main():
         lv, code, note = verdicts[it[0]]
         print("        不删样本：%s → %s（%s）" % (os.path.basename(it[3]), code, note[:90]))
 
+    # ---- 点名强删：名单命中的隔离件从「不删」挪进「要删」 ----
+    #   匹配只拿候选元组里的成品名（it[3]）比，比中的项仍然按 it[0]（那个 _sssss 备份件）去删。
+    #   名单里写成品名（quarantine 就是这个写法）或写 X_sssss.pdf 都算同一个，因为两边都先过
+    #   canon_pdf_name 归一；但绝不拿名单里的名字去拼 key —— 名字打错只会表现为「没命中」，
+    #   而不是删掉一个凑出来的对象。未命中在 --apply 时直接拒，不让人拿半对的名单去删。
+    forced = []
+    if force_want is not None:
+        forced, miss = pick_forced(force_want, keep, susp, quar, suffixes)
+        for nm in miss[:10]:
+            print("        名单未命中：%s —— 本轮候选里没有这个名字"
+                  "（--prefix 写错？名单来自别的目录？还是它本轮没被隔离？）" % nm)
+        if len(miss) > 10:
+            print("        …未命中共 %d 个" % len(miss))
+        if args.apply and miss:
+            sys.exit("错误：点名强删名单有 %d 个名字在本轮候选里找不到，拒绝删除 —— 对不上通常是 "
+                     "--prefix 写错或名单来自别的目录，这种情况不能「照剩下的删」。"
+                     "先不带 --apply 干跑看清命中数，或把名单里确实不该删的那几行去掉再重跑"
+                     % len(miss))
+        if forced:
+            print("      点名强删：%s 个隔离件按名单放行（不删样本：%s）" % (
+                format(len(forced), ","),
+                "、".join(os.path.basename(it[0]) for it in forced[:3])
+                + ("…" if len(forced) > 3 else "")))
+        else:
+            print("      点名强删：名单 %s 个名字全部命中已通过校验的候选，本轮无需放行新项"
+                  % format(len(force_want), ","))
+
     # ---- [4/5] 预览 + 确认 ----
-    will = keep
+    forced_keys = set(it[0] for it in forced)
+    will = keep + forced
     freed = sum(int(c[1] or 0) for c in will)
     print("\n[4/5] 预览")
     print("  桶版本控制：%s —— %s" % (vers, "已开启：误删可由版本恢复" if vers == "Enabled"
-                                      else "开不了：删除是永久的，所以删前一律先复制进回收站"
-                                      if not args.no_trash else "开不了，且回收站已关闭：删掉的件找不回来"))
+                                      else "开不了：删除是永久的，所以删前一律先留底"
+                                      if (backup_root or not args.no_trash)
+                                      else "开不了，且回收站与本地留底都没开：删掉的件找不回来"))
     print("  将要删除：%s 个 %s，预计释放 %s" % (
         format(len(will), ","), "/".join(suffixes), human_size(freed)))
-    if not args.no_trash:
+    if forced:
+        print("    ├ 其中按名单强删 %s 个（校验没过、本应隔离，结论：%s）" % (
+            format(len(forced), ","),
+            "、".join(sorted(set(verdicts[c[0]][1] for c in forced)))))
+    if backup_root:
+        print("  本地留底：%s" % backup_root)
+        print("    每件先 GET 落盘、比过体积与 MD5 才删；对不上就那一件不删 —— "
+              "往桶里写不进去时这是唯一的底")
+        if not args.no_trash:
+            print("    桶内回收站因此跳过（不再 COPY，也就不会再撞 403）")
+    elif not args.no_trash:
         print("  回收站：%s（保留原相对路径；每个件先 COPY 过来、核对成功才删原件）" % trash)
     else:
         print("  ⚠ 已指定 --no-trash：不复制、直接删。这一步之后没有任何回滚手段")
@@ -873,7 +1164,8 @@ def main():
                                              time.strftime("%Y-%m-%d %H:%M:%S")),
                             "干跑也会出这份文件；核对它，就是核对全流程"],
                            [(c[0], c[1], c[2], c[3], c[4], c[5],
-                             "%s/%s" % verdicts[c[0]][:2]) for c in will])
+                             "%s/%s%s" % (verdicts[c[0]][0], verdicts[c[0]][1],
+                                          " ←名单强删" if c[0] in forced_keys else "")) for c in will])
     pend_name = "pending_inflated_keys_%s.txt" % ts
     pending = write_names(os.path.join(out_dir, pend_name),
                           [os.path.basename(k) for k, s, e in no_infl] +
@@ -883,10 +1175,14 @@ def main():
                            "每行一个名字，可直接喂处理脚本：python pdf_rename_inflate_upload.py "
                            "--prefix \"<同一个目录>\" --files-from \"%s\"" % pend_name,
                            "共 %d 行。" % (len(no_infl) + len(small))])
+    rest_quar = [v for v in susp + quar if v[0] not in forced_keys]
     quar_path = write_names(os.path.join(out_dir, "quarantine_%s.txt" % ts),
                             ["%s → %s（%s）" % (os.path.basename(v[3]), verdicts[v[0]][1], verdicts[v[0]][2])
-                             for v in susp + quar],
-                            ["校验没过或拿不准的候选：本轮不删，人工看一眼。共 %d 行" % (len(susp) + len(quar))])
+                             for v in rest_quar],
+                            ["校验没过或拿不准的候选：本轮不删，人工看一眼。共 %d 行%s"
+                             % (len(rest_quar),
+                                "（另有 %d 个已按名单强删，记在 to_delete 那份里）"
+                                % len(forced) if forced else "")])
     print("  名单已落盘：\n    待删   %s\n    待补膨胀版 %s\n    隔离待看 %s" % (to_delete, pending, quar_path))
 
     # 列目录被 --max-list 截断过，配对结论就不成立：“没看到膨胀版”可能只是“没列到”。
@@ -894,17 +1190,35 @@ def main():
     if args.apply and not complete:
         sys.exit("错误：目录没列完（--max-list），配对结论可能是「没看到」而不是「不存在」，"
                  "拒绝删除。去掉 --max-list 重跑，或用 --only-keys-file 只按备份脚本已核对的名单删")
+    # 备份写到一半才发现盘满是最坏的处境：前一半已经删了、后一半还没底。
+    # 所以先按本轮名单体积要一次空间（再加 10% 余量），不够就直接拒 --apply。
+    if backup_root and args.apply:
+        need = sum(int(c[1] or 0) for c in will)
+        free = shutil.disk_usage(backup_root).free
+        if free < need + need // 10:
+            sys.exit("错误：本地留底目录 %s 只剩 %s，装不下本轮需要留底的 %s（还要留 10%% 余量）。"
+                     "换个盘，或用 --only-keys-file 缩小范围再来"
+                     % (backup_root, human_size(free), human_size(need)))
     gate(args.apply, args.yes, [
         "\n再次确认：即将从 %s 真删 %s 个文件（释放 %s）。" % (
             prefix, format(len(will), ","), human_size(freed)),
-        "  桶版本控制：%s；%s" % (vers, "每个件会先复制进 %s 再删" % trash if not args.no_trash
-                                    else "回收站已关闭，删掉就找不回来"),
-        "  （桶开不了版本控制，回收站就是唯一的反悔机会 —— 除非磁盘极紧，不建议 --no-trash）"],
+        "  桶版本控制：%s；%s" % (vers,
+                                 "每件先 GET 到本地留底 %s 再删" % backup_root if backup_root
+                                 else "每个件会先复制进 %s 再删" % trash if not args.no_trash
+                                 else "回收站已关闭，删掉就找不回来"),
+        ("  （往桶里写不了时，本地留底就是唯一的反悔机会；每件都要比过体积与 MD5 才删）"
+         if backup_root else
+         "  （桶开不了版本控制，回收站就是唯一的反悔机会 —— 除非磁盘极紧，不建议 --no-trash）")
+        + ("\n  ⚠ 其中 %s 个是校验没过的隔离件，凭 --force-from 名单放行：%s"
+           % (format(len(forced), ","),
+              "它们的原件备份已 GET 到本地留底，重做依据在磁盘上" if backup_root
+              else "删掉后就再无重做依据"))],
         action="删除")
 
     # ---- [5/5] 执行：COPY → 核对副本 → DELETE → 确认消失 ----
     print("\n[5/5] 开始执行…")
     ok_rows, fail_rows, skip_rows = [], [], []
+    backup_rows = []      # --backup-local：(桶内 key, 本地路径, 体积, md5)
     freed_real = [0]
     size_map = dict((c[0], int(c[1] or 0)) for c in will)   # 预先建索引，不随候选数线性重算
 
@@ -923,21 +1237,61 @@ def main():
         if esize != size or (etag and eetag and etag != eetag):
             return ("fail", key, "预览后对象变了（大小 %s→%s、ETag %s→%s），停手不删"
                     % (size, esize, etag, eetag))
-        # 查 2：对应的膨胀版此刻仍在
+        # 查 2：对应的膨胀版此刻仍在，而且仍是预览时那一份
         try:
-            ok_i, _, _ = client.head(ikey)
+            ok_i, isize_now, ietag_now = client.head(ikey)
         except Exception as e:
             return ("fail", key, "确认膨胀版时 HEAD 异常：%s" % e)
         if not ok_i:
             return ("fail", key, "膨胀版 %s 不见了！原件不删" % os.path.basename(ikey))
+        if partner_drift(isize, ietag, isize_now, ietag_now):
+            # 只在存在性之外多对一次体积/ETag，不额外发请求（这次 HEAD 本就要发）
+            return ("fail", key, "预览后膨胀版被人动过（体积 %s→%s、ETag %s→%s），不删"
+                    % (isize, isize_now, etag_short(ietag), etag_short(ietag_now)))
+        # 本地留底（--backup-local）：GET 落盘 → 比体积、MD5 → 才允许往下走。
+        # 位置必须在 COPY/DELETE 之前：这一步一过，删掉的件就确有底；
+        # 顺序反了就变成“先删再试试看能不能救”。
+        bnote = ""
+        if backup_root:
+            lp = local_path_for(backup_root, key)
+            usable, _, md5, _why = check_backup(lp, size, etag)
+            if usable:
+                bnote = "本地已有备份且校验一致，未重复下载"
+            else:
+                try:
+                    got, md5 = client.get_to_file(key, lp)
+                except Exception as e:
+                    return ("fail", key, "本地留底失败，原件不删：%s" % e)
+                if size and got != int(size):
+                    return ("fail", key, "本地留底体积 %s ≠ 桶内 %s，原件不删" % (got, size))
+                if etag_is_plain_md5(etag) and md5 != str(etag).strip('"').lower():
+                    return ("fail", key, "本地留底 MD5 %s ≠ 桶内 ETag %s，原件不删"
+                            % (md5, str(etag).strip('"')))
+                bnote = "已留底 %s" % os.path.basename(lp)
+            backup_rows.append((key, lp, size, md5))
         # 回收站：先复制 + 核对（桶开不了版本控制，这一步就是唯一的反悔机会）
         # 保留原相对路径，不同子目录里的同名原件才不会互相盖名
         rel = key[len(key_prefix) + 1:] if key.startswith(key_prefix + "/") \
             else os.path.basename(key)
         tk = trash + rel
-        if not args.no_trash:
+        if not args.no_trash and not backup_root:
             try:
                 client.copy(key, tk)
+            except urllib.error.HTTPError as e:
+                # 只印 str(e) 会把错因埋掉：同样是 403，AccessDenied（没写权限）、
+                # SignatureDoesNotMatch（签名/时钟）和网关自己拦下来，处置办法完全两样。
+                # _call 已经把响应体塞回 fp 了，这里读它就行。
+                detail = _err_code(e.read())
+                if e.code == 403:
+                    _abort.set()      # 权限类错不会重试重试就好了，别把整批白碰一遍
+                    # 这里一定要印完整 key：只印 basename 看不出被套在哪一层前缀里，
+                    # 而排查权限靠的就是这个完整落点形状（别拿它换短路径）。
+                    print("\n      ✕ COPY 被拒 403：%s\n"
+                          "        写去处：%s\n"
+                          "        后面的不试了：这一步过不去就绝不删，先查权限或网关。"
+                          % (detail, tk))
+                return ("fail", key, "复制进回收站失败，原件不删：HTTP %s：%s"
+                        % (e.code, detail))
             except Exception as e:
                 return ("fail", key, "复制进回收站失败，原件不删：%s" % e)
             try:
@@ -960,10 +1314,17 @@ def main():
         except Exception:
             still = False
         if still:
-            return ("fail", key, "删完对象还在，网关没接受（回收站副本 %s 已留）" % tk)
+            return ("fail", key, "删完对象还在，网关没接受（%s）"
+                    % ("本地留底 %s" % os.path.basename(lp) if backup_root
+                       else "回收站副本 %s 已留" % tk))
+        if backup_root:
+            tail = "；%s" % bnote
+        elif args.no_trash:
+            tail = ""
+        else:
+            tail = "；回收站 %s" % tk
         return ("ok", key, "已删（释放 %s；膨胀版 %s 在位%s）"
-                % (human_size(size), os.path.basename(ikey),
-                   "" if args.no_trash else "；回收站 %s" % tk))
+                % (human_size(size), os.path.basename(ikey), tail))
 
     try:
         items = will
@@ -1008,8 +1369,17 @@ def main():
         (ok_rows if st == "ok" else fail_rows if st == "fail" else skip_rows).append((key, msg))
         if st == "ok":
             freed_real[0] += size_map.get(key, 0)
+    # 本地留底清单：事后要知道“哪个 key 在磁盘哪个位置、MD5 是多少”，
+    # 不写这份就等于“底是有的，但没人说得清在不在”。
+    if backup_rows:
+        bp = write_rows(os.path.join(out_dir, "backup_manifest_%s.tsv" % ts),
+                        ["本地留底清单：桶内key 本地路径 体积 md5",
+                         "拿这份核对磁盘上的底。要从本地补回桶里需要 PutObject（当前账号多半没有），"
+                         "真到那步把整个目录交给运维即可"],
+                        backup_rows)
+        print("  本地留底清单：%s（%s 件）" % (bp, format(len(backup_rows), ",")))
     finish(log_path, ok_rows, fail_rows, skip_rows, _run, freed_real[0], len(copies),
-           len(no_infl), len(small), "删除", trash, args.no_trash)
+           len(no_infl), len(small), "删除", trash, args.no_trash, backup_root)
 
 
 def tally(st, size):
@@ -1026,7 +1396,7 @@ def tally(st, size):
 
 
 def finish(log_path, ok_rows, fail_rows, skip_rows, run, freed, n_copies, n_pending,
-           n_small, action, trash, no_trash):
+           n_small, action, trash, no_trash, backup_root=None):
     """日志写全：成功、失败、跳过都带原因与文件名（三个名单都是 (key, msg) 二元组），
        末尾一段汇总与回滚指引。行格式：状态\tkey\t原因，方便直接 grep FAIL。"""
     deleting = action == "删除"
@@ -1046,7 +1416,8 @@ def finish(log_path, ok_rows, fail_rows, skip_rows, run, freed, n_copies, n_pend
         if deleting:
             f.write("# 同层无膨胀版（没动过）%d；膨胀版体积不足（没动过）%d\n"
                     % (n_pending, n_small))
-        f.write("# 回收站：%s\n" % ("已关闭 --no-trash（无回滚手段）" if no_trash else trash))
+        f.write("# 回收站：%s%s\n" % ("已关闭（无桶内副本）" if (no_trash or backup_root) else trash,
+                                       "；本地留底：%s" % backup_root if backup_root else ""))
     out_dir = os.path.dirname(log_path)
     ts = re.search(r"(\d{14})", os.path.basename(log_path))
     ts = ts.group(1) if ts else time.strftime("%Y%m%d%H%M%S")
@@ -1064,7 +1435,17 @@ def finish(log_path, ok_rows, fail_rows, skip_rows, run, freed, n_copies, n_pend
              run["skip"], run["fail"]))
     print("  完整日志：%s（每行一条，含成功/失败/跳过与原因）" % log_path)
     print("  成功清单：%s%s" % (ok_p, "；失败清单：%s" % fail_p if fail_p else ""))
-    if run["ok"] and deleting:
+    if run["ok"] and deleting and backup_root:
+        print("  ↩ 本轮 %s 件的底在本地：%s（桶里没有副本，别用 --restore；"
+              "逐件路径与 MD5 见 backup_manifest_*.tsv）"
+              % (format(run["ok"], ","), backup_root))
+    elif run["ok"] and deleting and no_trash:
+        # --no-trash 下根本没有副本，这句指引要是照旧印“想反悔：--restore …”
+        # 就是给人一个假希望：--restore 靠把副本复制回原位，而本轮压根没复制过。
+        print("  ⚠ 本轮是 --no-trash：桶里没留下任何副本（%s 里也没有）—— "
+              "别指望 --restore：它要把副本复制回原位，而本轮压根没复制过。"
+              "要恢复只能从别处重新拿到原件本身" % trash)
+    elif run["ok"] and deleting:
         print("  想反悔：%s --restore --trash-prefix \"%s\" --apply"
               % (os.path.basename(__file__), trash))
     elif run["ok"]:
@@ -1118,6 +1499,9 @@ def run_restore(client, args, trash, key_prefix, out_dir, log_path, quiet, vers)
             return ("skip", orig, "原位已有对象（%s），不覆盖" % human_size(esize))
         try:
             client.copy(tk, orig)
+        except urllib.error.HTTPError as e:
+            # 恢复路径比删除更需要看到真错因：东西已经不在原位了，不能只回一句 403
+            return ("fail", orig, "复制失败：HTTP %s：%s" % (e.code, _err_code(e.read())))
         except Exception as e:
             return ("fail", orig, "复制失败：%s" % e)
         try:

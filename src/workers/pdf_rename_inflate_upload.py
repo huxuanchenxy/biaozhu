@@ -53,6 +53,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   python pdf_rename_inflate_upload.py -n 20 --apply --verify tail     # 不装库也拦住「尾部没 startxref」那批
   python pdf_rename_inflate_upload.py -n 20 --apply --verify-strict   # 连「可疑」也不上传（默认只拦判坏的）
   python pdf_rename_inflate_upload.py -n 20 --apply --verify off      # 关掉校验（老行为）
+  # 重写再膨胀：专治「原件自带指针就坏、尾部没 startxref」那批（光 --refix 重跑修不好），会改动字节：
+  python pdf_rename_inflate_upload.py --files-from bad.txt --rewrite --apply   # 只重做名单里那几个
   python pdf_rename_inflate_upload.py --refix --refix-only -n 0 -w 8 -q    # 只重做有 _sssss 备份的，新文件不碰
   python pdf_rename_inflate_upload.py --refix --refix-only -n 0 -w 8 -q --scan-first   # 旧行为：先探完再开工（干跑摸底总数用）
 
@@ -203,6 +205,9 @@ CONFIG = {
     #   直接把 pdf_check_damaged.py 的 --list-file 产出甚至 CSV 报告行粘进来也能识别。
     #   临时覆盖：--files-from bad.txt（只写参数不带值=禁用）。
     "FILES_FROM": "",
+    #   名单文件形式不限：每行一个名字 / 自家流水日志 TSV / 删除脚本的隔离名单
+    #   （形如「名字 → TAIL_NO_STARTXREF（…）」，只在全大写校验码处切，文件名里自带箭头的仍按名字处理），
+    #   都只取文件名部分（带目录前缀也没关系，按最后一个 / 之后算），写 X.pdf 或 X_sssss.pdf 等价。
     # ---- 签名区域/服务：MinIO 一般保持 us-east-1 / s3 即可 ----
     "AWS_REGION": "us-east-1",
     "AWS_SERVICE": "s3",
@@ -993,6 +998,7 @@ _TAIL_XREF_ANY_RE = re.compile(rb"startxref\s+(\d{1,20})\s+%%EOF")
 
 _verify_mode = "auto"       # auto=有 fitz 用内核、没有自动降级；tail=强制零依赖；off=不校验
 _verify_strict = False      # True：连「可疑」（琐碎告警，实测 WPS 仍能打开）也拦
+_rewrite = False            # --rewrite：膨胀前先用内核重建 xref 表（默认关，本管线原口径是纯追加）
 _fitz = None
 _fitz_tried = False
 _verify_lock = threading.Lock()     # fitz 的警告收集器是进程级全局，必须整段串行
@@ -1002,6 +1008,13 @@ def set_verify(mode="auto", strict: bool = False):
     global _verify_mode, _verify_strict
     _verify_mode = str(mode or "auto").lower()
     _verify_strict = bool(strict)
+
+
+def set_rewrite(on) -> None:
+    """开/关「重写再膨胀」。只应由 --rewrite 显式打开：它会**改动文件字节**，
+       和「膨胀只追加不改写」的原口径不同，不设默认、不从环境变量偷偷生效。"""
+    global _rewrite
+    _rewrite = bool(on)
 
 
 def _load_fitz():
@@ -1019,6 +1032,50 @@ def _load_fitz():
             log(f"提示：导入 PyMuPDF 失败（{type(e).__name__}: {str(e)[:80]}），上传前校验自动降级为"
                 f"「尾部指针判定」；想升级成真正的阅读器口径：pip install pymupdf")
     return _fitz
+
+
+def rewrite_xref(data: bytes) -> tuple:
+    """--rewrite 那一步：用 PyMuPDF 把 PDF 重写一遍，重建 xref 表。
+
+       专治那批「原件自带的指针就坏了、阅读器靠扫描重建才打得开、尾部却没有可用 startxref」的件：
+       实测对这种件光靠重膨胀（refix）三个全仍是 TAIL_NO_STARTXREF（追加不碰结构），
+       先重写一遍再追加则三个全过（尾部出现 startxref 且指得回 xref）。
+
+       代价必读：重写会重排对象 + 重压缩，**字节面目全非**（实测 255.5KB→140.8KB、
+       127.8KB→64.6KB、2.0MB→1.4MB，页数不变）。覆上去之后桶里就不再有源件原始字节，
+       「这毛病是源件自带的」这条物证只能靠 _sssss 备份——修完不该顺手删备份。
+
+       返回 (新字节或 None, 一句话说明)。任何一步不放心都返回 None，让调用方回到纯追加老路子，
+       绝不拿「看着更干净」去换「可能改坏」。"""
+    fitz = _load_fitz()
+    if fitz is None:
+        return None, "未装 PyMuPDF，无法重写（pip install pymupdf）"
+    try:
+        with _verify_lock:                      # fitz 的警告收集器是进程级全局，整段串行
+            d = fitz.open(stream=data, filetype="pdf")
+            try:
+                pages_before = d.page_count
+                if not bool(getattr(d, "is_repaired", False)):
+                    return None, "原件尾部指针本来就可用，不必重写（好好的文件不重压一遍）"
+                out = d.tobytes(garbage=3, deflate=True)
+            finally:
+                d.close()
+            chk = fitz.open(stream=out, filetype="pdf")
+            try:
+                pages_after = chk.page_count
+                still = bool(getattr(chk, "is_repaired", False))
+            finally:
+                chk.close()
+    except Exception as e:
+        return None, "重写失败：%s: %s" % (type(e).__name__, str(e)[:80])
+    if not out.startswith(b"%PDF-"):
+        return None, "重写结果连 %PDF- 魔数都没有，放弃重写"
+    if not pages_after or pages_after != pages_before:
+        return None, "页数变了（%d→%d），放弃重写" % (pages_before, pages_after)
+    if still:
+        return None, "重写后内核仍要走修复分支，没救回来，放弃重写"
+    return out, "已重写：%d 页不变，体积 %s→%s，is_repaired 已消解" % (
+        pages_before, human_size(len(data)), human_size(len(out)))
 
 
 def verify_desc() -> str:
@@ -1147,7 +1204,7 @@ _lock = threading.Lock()
 _stats = {
     "processed": 0, "repaired": 0, "refix": 0, "fail": 0,
     "skip_done": 0, "skip_big": 0, "skip_notpdf": 0, "claim_fail": 0,
-    "skip_notrefix": 0,
+    "skip_notrefix": 0, "rewritten": 0,
     "plan_new": 0, "plan_repair": 0, "plan_refix": 0,
     "verify_checked": 0, "verify_bad": 0,
     "verify_source_bad": 0, "verify_block": 0,
@@ -1371,8 +1428,21 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             if target is None:
                 bump("skip_big")
                 return
+            # --rewrite：只换「拿去膨胀的那份字节」。data 始终是原始件，因为校验基线、
+            # 下载量统计、_sssss 都靠它，不能被重写结果污染。
+            core = data
+            if _rewrite:
+                new, rnote = rewrite_xref(data)
+                if new is None:
+                    log(f"[{idx}/{total}] – {fname}：重写未采纳，仍按纯追加走（{rnote}）")
+                else:
+                    core = new
+                    target = target_for(len(core)) or target
+                    with _lock:
+                        _stats["rewritten"] += 1
+                    log(f"[{idx}/{total}] ○ {fname}：{rnote}")
             t = time.time()
-            inflated, _ = inflate_bytes(data, target)
+            inflated, _ = inflate_bytes(core, target)
             t_inf = time.time() - t
             # 上传前校验：拿 sidecar 里的原件当基线，只有「原件好好的、我们做的产物坏了」才拦
             t = time.time()
@@ -1424,7 +1494,19 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
             return
 
         t = time.time()
-        inflated, _ = inflate_bytes(data, target)
+        # --rewrite：同上，只换拿去膨胀的字节，传副本用的 data 保持原始件不动
+        core = data
+        if _rewrite:
+            new, rnote = rewrite_xref(data)
+            if new is None:
+                log(f"[{idx}/{total}] – {fname}：重写未采纳，仍按纯追加走（{rnote}）")
+            else:
+                core = new
+                target = target_for(len(core)) or target
+                with _lock:
+                    _stats["rewritten"] += 1
+                log(f"[{idx}/{total}] ○ {fname}：{rnote}")
+        inflated, _ = inflate_bytes(core, target)
         t_inf = time.time() - t
         # 上传前校验：放在「原子认领」之前——拦下的时候连 _sssss 也不建，下次重跑仍会重试，
         # 不会留下一个“已完成”的假标记让后续轮次跳过这个坏产物
@@ -1482,6 +1564,9 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
 # ---------------- 定向名单（CONFIG["FILES"] / --files）：只处理点名的这几个文件 ----------------
 
 _ARTIFACT_RE = re.compile(r"(" + "|".join(re.escape(s) for s in _ARTIFACT_SUFFIXES) + r")$", re.I)
+# 隔离名单箭头后面那个校验码的形状：全大写 ASCII，可含数字/下划线（TAIL_NO_STARTXREF、OPEN_FAIL…）。
+# 靠它区分「名字 → 码」与「文件名里自带箭头」两种行，不拿前者适后者。
+_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{3,}$")
 
 
 def parse_file_list(raw) -> list:
@@ -1575,6 +1660,18 @@ def load_files_from(path: str, from_config: bool = False) -> list:
             if not cand:
                 continue
             ln = cand[0]
+        elif "\u2192" in ln:
+            # 删除脚本（pdf_delete_sssss.py）的隔离名单长这样：
+            #   ISO 12543-3-2011.pdf → TAIL_NO_STARTXREF（尾窗 24576 字节里找不到 startxref）
+            # 文件名本身带空格，不能按空格切。但也不能「见箭头就截」：这批标准件的文件名
+            # 里本来就可能出现箭头（实测已见过书名号、中文括号、分号），那种行得交给老路子
+            # 整行处理。所以两个条件都硬：箭头前那段以 .pdf 结尾，且箭头后紧跟一个全大写的
+            # 校验码（删除脚本写的就是 CODE/code 这种 ASCII 大写串，后面才接中文说明）。
+            head, _, tail = ln.rpartition("\u2192")
+            code = tail.strip().split("（", 1)[0].split(" ", 1)[0].strip()
+            if head.strip().lower().endswith(".pdf") and _CODE_RE.match(code):
+                ln = head.strip()
+            # 不满足就当普通条目往下走（旧行为），绝不在这里静默丢行——丢了名单就硬了
         if "," in ln:
             out.append(ln)
         else:
@@ -1897,6 +1994,9 @@ def print_summary(apply: bool, secs: float):
                      f"逐个文件看流水日志每行最后那列「校验：源件…/产物…」")
         emit(f"数据量：下载 {human_size(s['bytes_dl'])}，上传 {human_size(s['bytes_up'])}"
              f"（其中新增填充 {human_size(s['bytes_added'])}）")
+        if _rewrite:
+            emit(f"重写再膨胀：采纳 {s['rewritten']} 个（只重写了内核走了修复分支的原件，"
+                 f"其余按纯追加走，逐条原因看运行日志里「重写未采纳」那些行）")
         ndone = s["processed"] + s["repaired"] + s["refix"]
         tail = f"，平均 {human_secs(secs / ndone)}/个" if ndone else ""
         emit(f"总用时 {human_secs(secs)}{tail}")
@@ -1957,6 +2057,12 @@ def main():
     parser.add_argument("--verify-strict", action="store_true",
                         help="严格口径：连「可疑」（书签树/回退字体这类实测仍能打开的琐碎告警）"
                              "也拦下不上传；默认只拦 startxref/trailer 定位失败那一类")
+    parser.add_argument("--rewrite", action="store_true",
+                        help="膨胀前先用 PyMuPDF 重写一遍、重建 xref 表：专治「原件自带指针就坏、"
+                             "尾部没有可用 startxref」那批（这类光 --refix 重跑修不好，实测仍判坏）。"
+                             "注意它会**改动文件字节**（重排+重压缩，体积通常变小），与原「只追加不改写」"
+                             "口径不同，所以不设默认、不走环境变量；必须开着校验，建议配名单只用。"
+                             "没装 PyMuPDF 时不采纳重写、自动回到纯追加")
     parser.add_argument("--max-mb", type=float, default=None,
                         help=f"原件最大可处理尺寸 MiB（超过且无 _sssss 备份=规则外跳过）；"
                              f"不传则用 CONFIG['MAX_MB']（当前：{CONFIG['MAX_MB']}）。"
@@ -2044,6 +2150,10 @@ def main():
     vstrict = bool(args.verify_strict) or str(_pick("VERIFY_STRICT", None, env_name="PDF_VERIFY_STRICT")).lower() \
         in ("1", "true", "yes", "on")
     set_verify(vmode, vstrict)
+    set_rewrite(args.rewrite)
+    if args.rewrite and vmode == "off":
+        # 重写是唯一会改动文件结构的环节，没兜底就开：坏了会直接覆上去，不给人这个选项
+        parser.error("--rewrite 不许配 --verify off：重写会改动字节，必须让上传前双检兜着")
     set_big_limit(_pick("MAX_MB", args.max_mb, env_name="PDF_MAX_MB"))
 
     cols = shutil.get_terminal_size((100, 24)).columns
@@ -2056,6 +2166,9 @@ def main():
     else:
         verify_note = (f"上传前校验：{verify_desc()}；结论就在日志每行最后一列，"
                        + ("严格：可疑也拦" if vstrict else "只拦「产物比原件坏」那批"))
+    if args.rewrite:
+        print("注意：已开 --rewrite（重写再膨胀）——原件尾部指针不可用时才会真重写（好好的不重压），"
+              "产物字节会变、旧产物不可回退，而 _sssss 里的原件凭据不动；修完不建议删备份")
     if _BIG != 5 * _MIB:
         print(f"注意：原件尺寸上限已放宽到 {human_size(_BIG)}（--max-mb），"
               f"已膨胀过的完成版也会被当原件再膨一次——只建议配名单点名单个文件做验证")
