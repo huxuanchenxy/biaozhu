@@ -37,4 +37,6 @@ __pycache__/
 /src/workers/log20261030c/*.out
 /src/workers/backup
 /src/workers/delete_logs
+src/workers/orphans*.txt
 src/workers/orphans.txt
+src/workers/orphans_5.2_机械工程与制造_成品语料.txt

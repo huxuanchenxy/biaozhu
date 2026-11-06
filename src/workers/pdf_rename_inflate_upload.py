@@ -66,8 +66,8 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
 
   # 找「有 _sssss 备份、但主件 X.pdf 不见了」的那批（上一轮败在覆盖前，全目录扫描永远看不见它们）：
   #   只列一次目录做集合比对，一个 HEAD 都不发、一个字节都不搬，几万个对象也就一两分钟
-  python pdf_rename_inflate_upload.py --orphans-out orphans.txt                    # 只读排查，列完就退出
-  python pdf_rename_inflate_upload.py --files-from orphans.txt                     # 干跑：应逐行报 [dry·补做]
+  python pdf_rename_inflate_upload.py --orphans-out orphans.txt                    # 只读排查，列完就退出（文件名自动插目录标识，多目录不覆盖）
+  python pdf_rename_inflate_upload.py --files-from orphans.txt                     # 干跑：应逐行报 [dry·补做]（实际文件看上面打出的完整路径，含 slug）
   python pdf_rename_inflate_upload.py --files-from orphans.txt --apply             # 按名单补做覆盖 X.pdf
   #   别拿 5.8 万行的历史流水日志直接当名单去 -n 0 定位：那等于逐个名字 HEAD 十万次，
   #   而里面九成是「已完成」的白探；先 --orphans-out 出精确名单，把定位次数从几万次缩到孤儿那几个。
@@ -2121,7 +2121,9 @@ def main():
     parser.add_argument("--orphans-out", metavar="名单文件", default=None,
                         help="只读排查模式：列一次目录，找出「有 _sssss 备份但同层没有 X.pdf」的孤儿"
                              "（上一轮败在覆盖前），名字写进该文件后直接退出。一个 HEAD 都不发、"
-                             "不处理不写桶（相对路径按当前工作目录解析）；出的名单拿去 --files-from 补做")
+                             "不处理不写桶（相对路径按当前工作目录解析）。文件名会自动插上目录标识"
+                             "（如 orphans.txt → orphans_9.2_xxx_成品语料.txt），多目录不覆盖；"
+                             "出的名单拿去 --files-from 补做")
     parser.add_argument("--list-cap", type=int, default=0,
                         help="列目录最多收集多少个 PDF 就提前停（0=全量翻页；多机分片须各机设成相同值以保证全集一致）")
     parser.add_argument("--scan-first", action="store_true",
@@ -2180,6 +2182,11 @@ def main():
         # 且 resolve_named_targets 要全部探完才出结果，中间不报进度，看着就像卡住。
         # 这一趟不写处理流水日志（只读排查不该在日志目录里留下一份空流水）。
         out_arg = args.orphans_out
+        # 自动插目录标识：多目录各跑各的不互相覆盖（用户已手动包含 slug 则不重复插）
+        slug = log_slug(prefix)
+        _base, _ext = os.path.splitext(out_arg)
+        if slug not in _base:
+            out_arg = "%s_%s%s" % (_base, slug, _ext)
         out_path = out_arg if os.path.isabs(out_arg) else os.path.abspath(out_arg)
         print(f"孤儿排查（只读）：列目录 {prefix} …一个字节都不搬，列完就退出")
         keys = list_pdfs(endpoint, ak, sk, prefix, quiet=True, max_pdf=0)
