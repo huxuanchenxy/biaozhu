@@ -1247,7 +1247,8 @@ _LOG_PATH = None  # 本地处理流水日志路径（仅 apply 时写；由 --lo
 
 # 本次运行的统一时间戳（只有一份日志，拿它插上文件名；行内另有一个逐条时间）。
 # 导入时就固定，所以同一轮里多个写入点不会得到不同后缀。
-_RUN_STAMP = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+_RUN_START = datetime.datetime.now()   # 程序启动时刻（本地时间）：汇总里打印起止区间用
+_RUN_STAMP = _RUN_START.strftime("%Y%m%d%H%M%S")
 
 
 def set_log_path(path: str):
@@ -1593,6 +1594,7 @@ def entry_candidates(entry: str) -> list:
 
     容错这些写法：X.pdf / X_sssss.pdf（产物名，归一到 X）/ 带本地或桶内路径的完整串 /
     体检报告里的 CSV 行（取其中第一个以 .pdf 结尾的字段）。
+    文件名自带英文逗号时整行才是真名字：先按整行试，查不到再回退到 CSV 取法。
     现行后缀 _sssss 一定是我们生成的 sidecar，名字不可能属于原件，直接归一；
     历史后缀 _s/_smallsmall 先按旧产物理解（目标 X.pdf），找不到时再把整个名字
     当成原件名重试一次——避免把真叫 ABC_S.pdf 的文档误归一后拿去覆写另一个文件。
@@ -1607,19 +1609,33 @@ def entry_candidates(entry: str) -> list:
         pdfs = [p for p in fields if p.lower().endswith(".pdf")]
         if not pdfs:
             return []
-        s = pdfs[0]
-    name = s.split("/")[-1].strip()
-    if name.lower().endswith(".pdf"):
-        name = name[:-4]
-    if not name:
-        return []
-    m = _ARTIFACT_RE.search(name)
-    if not m:
-        return [name]
-    stem, suf = name[:m.start()], m.group(1).lower()
-    if not stem:
-        return [name]
-    return [stem] if suf == "_sssss" else [stem, name]
+        # 文件名自带英文逗号（如 "Handbook of Mould, Tool and Die Repair Welding.pdf"）：
+        # 整行才是真名字，只取逗号后那截会永远定位不到。整行以 .pdf 收尾、切完只有
+        # 一个 .pdf 字段时，先按整行试；查不到再回退到老的 CSV 取法（多一次 HEAD，
+        # 已有 CSV/表格行行为不变：A.pdf,B.pdf 这种两个 .pdf 字段的仍取第一个）。
+        if s.lower().endswith(".pdf") and len(pdfs) == 1:
+            raws = [s, pdfs[0]]
+        else:
+            raws = [pdfs[0]]
+    else:
+        raws = [s]
+    out = []
+    for raw in raws:
+        name = raw.split("/")[-1].strip()
+        if name.lower().endswith(".pdf"):
+            name = name[:-4]
+        if not name:
+            continue
+        m = _ARTIFACT_RE.search(name)
+        if not m:
+            cands = [name]
+        else:
+            stem, suf = name[:m.start()], m.group(1).lower()
+            cands = [name] if not stem else ([stem] if suf == "_sssss" else [stem, name])
+        for c in cands:
+            if c not in out:
+                out.append(c)
+    return out
 
 
 def load_files_from(path: str, from_config: bool = False) -> list:
@@ -2019,6 +2035,10 @@ def print_summary(apply: bool, secs: float):
     print()
     emit(f"===== 统计【{'APPLY（已改动桶）' if apply else 'DRY-RUN（未改动桶，加 --apply 才执行）'}】=====")
     if apply:
+        ndone = s["processed"] + s["repaired"] + s["refix"]
+        # t_* 是「线程·秒」：各线程把单文件 wall time 直接 += 进全局计数器，并发下互相重叠，
+        # 所以累计 ≈ 墙钟 × 并发数，不能当阶段耗时相加。这里补一行折算免得看汇总时误判。
+        cum = sum(s[k] for k in ("t_dl", "t_inf", "t_ver", "t_pu_s", "t_pu_l"))
         emit(f"结果：处理 {s['processed']}，补做 {s['repaired']}，重做 {s['refix']}，失败 {s['fail']}，"
              f"跳过 {s['skip_done'] + s['skip_big'] + s['skip_notpdf'] + s['claim_fail'] + s['skip_notrefix']}"
              f"（已完成 {s['skip_done']}／他人认领 {s['claim_fail']}／超尺寸 {s['skip_big']}"
@@ -2026,6 +2046,10 @@ def print_summary(apply: bool, secs: float):
         emit(f"各步骤累计耗时：下载 {human_secs(s['t_dl'])}，膨胀 {human_secs(s['t_inf'])}，"
              f"上传前校验 {human_secs(s['t_ver'])}，"
              f"传原件(_sssss) {human_secs(s['t_pu_s'])}，传扩大 {human_secs(s['t_pu_l'])}")
+        if ndone and cum:
+            emit(f"（口径：上行是线程·秒，跨并发叠加，累计/总用时 = "
+                 f"{cum / max(secs, 1e-6):.1f}× ≈ 并发度，两者不能相加；"
+                 f"折算单文件 {human_secs(cum / ndone)}，总用时另含扫描/收尾）")
         if _verify_mode != "off":
             emit(f"上传前校验：查了 {s['verify_checked']} 组；源件打不开 {s['verify_source_bad']}，"
                  f"产物打不开 {s['verify_bad']}，拦下未上传 {s['verify_block']}，其余都能打开")
@@ -2038,7 +2062,6 @@ def print_summary(apply: bool, secs: float):
         if _rewrite:
             emit(f"重写再膨胀：采纳 {s['rewritten']} 个（只重写了内核走了修复分支的原件，"
                  f"其余按纯追加走，逐条原因看运行日志里「重写未采纳」那些行）")
-        ndone = s["processed"] + s["repaired"] + s["refix"]
         tail = f"，平均 {human_secs(secs / ndone)}/个" if ndone else ""
         emit(f"总用时 {human_secs(secs)}{tail}")
     else:
@@ -2049,6 +2072,11 @@ def print_summary(apply: bool, secs: float):
         emit("（干跑：未下载/膨胀/上传，无步骤耗时；确认无误后加 --apply 执行）")
         if _verify_mode != "off":
             emit("（干跑不下载，所以也没做上传前校验；--apply 时才会逐份校验产物能不能打开）")
+    end = datetime.datetime.now()
+    t0 = _RUN_START.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    t1 = end.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    emit(f"起止时间：{t0} → {t1}"
+         f"（程序全程 {human_secs((end - _RUN_START).total_seconds())}，含启动/列目录/预筛）")
     log_summary(out)
 
 
