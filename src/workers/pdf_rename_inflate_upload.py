@@ -235,6 +235,15 @@ CONFIG = {
     #   只为「拿点名的超尺寸文件单独验证」才调大（--max-mb）；放宽后已膨胀的完成版
     #   会被当原件再膨一次，别在全目录模式下动它。
     "MAX_MB": 5,
+    # ---- 膨胀档位（MiB）：三档基值 + jitter 随机小数范围 ----
+    #   < 1M → INFLATE_MB_A 档    1M~2M → INFLATE_MB_B 档    2M~MAX_MB → INFLATE_MB_C 档
+    #   每档目标 = 基值 + random(JITTER_LO, JITTER_HI)，让产物不再整齐落在整数 MiB。
+    #   可用命令行参数覆盖：--inflate-mb-a / --inflate-mb-b / --inflate-mb-c / --inflate-jitter
+    "INFLATE_MB_A": 8,
+    "INFLATE_MB_B": 9,
+    "INFLATE_MB_C": 10,
+    "INFLATE_JITTER_LO": 0.1,
+    "INFLATE_JITTER_HI": 0.9,
     # ---- 默认并发线程数 / 单请求重试次数 / 单请求超时（秒）----
     "WORKERS": 4,
     "RETRIES": 4,
@@ -253,6 +262,13 @@ _TIMEOUT = int(CONFIG["TIMEOUT"])
 _MIB = 1024 * 1024
 _BIG = 5 * _MIB          # 分界：可处理原件 <5M，膨胀完成版至少 ~8M；超过且无 _sssss 视为规则外/已完成
 
+# 膨胀档位（MiB，整数基值；每档加 jitter 随机小数）
+_INF_A = float(CONFIG["INFLATE_MB_A"])
+_INF_B = float(CONFIG["INFLATE_MB_B"])
+_INF_C = float(CONFIG["INFLATE_MB_C"])
+_JIT_LO = float(CONFIG["INFLATE_JITTER_LO"])
+_JIT_HI = float(CONFIG["INFLATE_JITTER_HI"])
+
 
 def set_big_limit(mib) -> None:
     """调大「原件最大可处理尺寸」（默认 5MiB，--max-mb / PDF_MAX_MB）。
@@ -265,6 +281,33 @@ def set_big_limit(mib) -> None:
         return
     if v > 0:
         _BIG = int(round(v * _MIB))
+
+
+def set_inflate_bands(bands_str: str, jitter_str: str) -> None:
+    """解析 --inflate-mb 和 --inflate-jitter 参数，覆盖膨胀档位基值和 jitter 范围。
+
+    bands_str: "8,9,10" 形式，三档 MiB 基值；留空则保持 CONFIG 默认
+    jitter_str: "0.1-0.9" 形式，随机小数范围；留空则保持 CONFIG 默认
+    非法格式 / ≤0 值一律忽略对应字段，保持原值。"""
+    global _INF_A, _INF_B, _INF_C, _JIT_LO, _JIT_HI
+    if bands_str:
+        parts = [p.strip() for p in bands_str.split(",") if p.strip()]
+        if len(parts) == 3:
+            try:
+                a, b, c = [float(p) for p in parts]
+                if a > 0 and b > 0 and c > 0:
+                    _INF_A, _INF_B, _INF_C = a, b, c
+            except ValueError:
+                pass
+    if jitter_str:
+        if "-" in jitter_str:
+            lo_s, hi_s = [p.strip() for p in jitter_str.split("-", 1)]
+            try:
+                lo, hi = float(lo_s), float(hi_s)
+                if 0 <= lo <= hi:
+                    _JIT_LO, _JIT_HI = lo, hi
+            except ValueError:
+                pass
 
 
 # ---------------- 配置读取（CONFIG / 环境变量 / .env 兼容） ----------------
@@ -882,28 +925,29 @@ class Minio:
 
 # ---------------- 膨胀规则与实现 ----------------
 
-# 目标档位（原始大小 → 目标整数部分 MiB）：<1M→8、1M~2M→9、2M~上限→10、超过上限不处理。
-# 目标在整数部分之上叠随机小数(_JITTER)，让产物不再是清一色的 8M/9M/10M，
-# 而是 8点几 / 9点几 / 10点几。
-_JITTER_LO, _JITTER_HI = 0.1, 0.9   # 随机小数范围（MiB）
+# 目标档位（原始大小 → 目标整数部分 MiB）：
+#   <1M→INF_A、1M~2M→INF_B、2M~_BIG→INF_C、超过上限不处理。
+# 目标在整数部分之上叠随机小数(_JIT_LO~_JIT_HI)，让产物不再是清一色的 8M/9M/10M，
+# 而是 A点几 / B点几 / C点几。
+# 档位基值和 jitter 范围可由命令行 --inflate-mb-a/b/c / --inflate-jitter 覆盖。
 
 
-def _band_target(base_mib: int) -> int:
-    """档位基值 + 随机小数，返回字节目标（保留档位整数部分，小数落在 _JITTER 区间）。"""
-    return int(round((base_mib + random.uniform(_JITTER_LO, _JITTER_HI)) * _MIB))
+def _band_target(base_mib: float) -> int:
+    """档位基值 + 随机小数，返回字节目标（保留档位整数部分，小数落在 _JIT_LO~_JIT_HI 区间）。"""
+    return int(round((base_mib + random.uniform(_JIT_LO, _JIT_HI)) * _MIB))
 
 
 def target_for(size: int):
     """按原始大小返回目标膨胀大小（字节，档位内随机）；超过 _BIG（默认 5M）返回 None。
 
-    上限被 --max-mb 放宽后，大原件取「最大档 10.x」与「原件 + 1.xMiB」里更大的那个：
+    上限被 --max-mb 放宽后，大原件取「最大档 INF_C」与「原件 + 1.xMiB」里更大的那个：
     既保证产物一定比原件大（否则填充块为空，白跑一轮），又不会一次胀出几十 MB。"""
     if size < 1 * _MIB:
-        return _band_target(8)
+        return _band_target(_INF_A)
     if size < 2 * _MIB:
-        return _band_target(9)
+        return _band_target(_INF_B)
     if size <= _BIG:
-        return max(_band_target(10), size + _band_target(1))
+        return max(_band_target(_INF_C), size + _band_target(1))
     return None
 
 
@@ -2160,6 +2204,15 @@ def main():
                         help=f"原件最大可处理尺寸 MiB（超过且无 _sssss 备份=规则外跳过）；"
                              f"不传则用 CONFIG['MAX_MB']（当前：{CONFIG['MAX_MB']}）。"
                              f"只为单文件验证而调大：放宽后已膨胀的完成版会被当原件再膨一次")
+    parser.add_argument("--inflate-mb", type=str, default=None,
+                        help=f"膨胀三档基值（MiB），逗号分隔：A,B,C；"
+                             f"<1M→A 档、1M~2M→B 档、2M~MAX_MB→C 档；"
+                             f"每档再加 --inflate-jitter 指定范围的随机小数。"
+                             f"默认 {CONFIG['INFLATE_MB_A']},{CONFIG['INFLATE_MB_B']},{CONFIG['INFLATE_MB_C']}")
+    parser.add_argument("--inflate-jitter", type=str, default=None,
+                        help=f"膨胀 jitter 随机小数范围，格式 LO-HI（MiB），"
+                             f"每档目标=基值+random(LO,HI)；默认 {CONFIG['INFLATE_JITTER_LO']}-{CONFIG['INFLATE_JITTER_HI']}；"
+                             f"传 0.0-0.0 即可取消随机小数、每档产物都落在基值上")
     parser.add_argument("-n", "--limit", type=int, default=None,
                         help="本轮处理上限（只计本轮真要动的文件）；全目录模式默认 10，"
                              "定向名单模式默认=名单全做；0=不限")
@@ -2289,6 +2342,7 @@ def main():
         # 重写是唯一会改动文件结构的环节，没兜底就开：坏了会直接覆上去，不给人这个选项
         parser.error("--rewrite 不许配 --verify off：重写会改动字节，必须让上传前双检兜着")
     set_big_limit(_pick("MAX_MB", args.max_mb, env_name="PDF_MAX_MB"))
+    set_inflate_bands(args.inflate_mb, args.inflate_jitter)
 
     cols = shutil.get_terminal_size((100, 24)).columns
     mk_ok, mk_fail = make_marks()
@@ -2322,6 +2376,10 @@ def main():
         print("名单语义：X.pdf 与 X_sssss.pdf 算同一个文件；已膨胀过的从 _sssss 取原件按当前规则"
               "重新膨胀并覆盖 X.pdf（_sssss 不动），没处理过的正常处理")
         print(f"PDF 全程内存处理不落盘（无本地残留）；{log_note}")
+        print(f"膨胀规则：<1M→{_INF_A}±{_JIT_LO}~{_JIT_HI}M  1~2M→{_INF_B}±{_JIT_LO}~{_JIT_HI}M  "
+              f"2M~上限→{_INF_C}±{_JIT_LO}~{_JIT_HI}M  上限={_BIG//_MIB}M"
+              + (f"（命令行 --inflate-mb / --inflate-jitter 覆盖）"
+                 if (args.inflate_mb or args.inflate_jitter) else ""))
         print(verify_note)
         if workers > 1 and not args.quiet:
             print("提示：多线程下各文件进度条会交错，可加 -q 只看逐文件结果行")
@@ -2380,6 +2438,10 @@ def main():
         if args.refix_only:
             print("只重做模式（--refix-only）：没有任何 _sssss 备份的文件本轮不碰，不会新建")
         print(f"PDF 全程内存处理不落盘（无本地残留）；{log_note}")
+        print(f"膨胀规则：<1M→{_INF_A}±{_JIT_LO}~{_JIT_HI}M  1~2M→{_INF_B}±{_JIT_LO}~{_JIT_HI}M  "
+              f"2M~上限→{_INF_C}±{_JIT_LO}~{_JIT_HI}M  上限={_BIG//_MIB}M"
+              + (f"（命令行 --inflate-mb / --inflate-jitter 覆盖）"
+                 if (args.inflate_mb or args.inflate_jitter) else ""))
         print(verify_note)
         if workers > 1 and not args.quiet:
             print("提示：多线程下各文件进度条会交错，可加 -q 只看逐文件结果行")
