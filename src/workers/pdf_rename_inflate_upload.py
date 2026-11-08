@@ -321,8 +321,31 @@ def _pick(name: str, cli_value=None, env_name=None, dotenv_keys=None) -> str:
     return ""
 
 
-# endpoint 的实际来源（命令行 / 环境变量 / .env），只用于启动横幅：避免「到底连的是哪台机器」靠猜
+# 启动横幅里用来显示最终配置来自哪里：避免「这次跑的是哪台机器 / 哪套 AK 账号」靠猜
 _ENDPOINT_SRC = ""
+_AK_SRC = ""
+_SK_SRC = ""
+
+
+def _resolve_secret(cli_value, key: str) -> tuple:
+    """按「命令行 --xxx > 环境变量 MINIO_xxx > CONFIG > .env」的优先级取 AK/SK，
+    同时返回来源标签；与 endpoint 的解析同构，便于启动横幅一眼看清。"""
+    # 环境变量名是 MINIO_ACCESS_KEY（带 MINIO_ 前缀），但命令行参数是 --access-key（不带前缀）
+    bare = key.replace("MINIO_", "", 1)
+    cli_name = "--" + bare.replace("_", "-").lower()
+    if cli_value:
+        return str(cli_value).strip(), f"命令行 {cli_name}"
+    env = os.environ.get(key)
+    if env:
+        return env.strip(), f"环境变量 {key}"
+    cfg = CONFIG.get(key)
+    if cfg:
+        return str(cfg).strip(), "CONFIG"
+    dot = _dotenv_values()
+    for k in (key, "VITE_" + key):
+        if dot.get(k):
+            return str(dot[k]).strip(), f".env 的 {k}"
+    return "", ""
 
 
 def _resolve_endpoint(cli_value) -> tuple:
@@ -342,11 +365,12 @@ def _resolve_endpoint(cli_value) -> tuple:
 
 def resolve_endpoint_ak_sk(args) -> tuple:
     """返回 (endpoint, ak, sk)；配置缺失时给出可操作报错。endpoint 不写死在本文件里，
-       只认命令行 --endpoint / 环境变量 MINIO_ENDPOINT / 项目 .env。"""
-    global _ENDPOINT_SRC
+       只认命令行 --endpoint / 环境变量 MINIO_ENDPOINT / 项目 .env。AK/SK 同理，命令行优先；
+       最终来源同步写入 _ENDPOINT_SRC / _AK_SRC / _SK_SRC 供启动横幅打印。"""
+    global _ENDPOINT_SRC, _AK_SRC, _SK_SRC
     endpoint, _ENDPOINT_SRC = _resolve_endpoint(args.endpoint)
-    ak = _pick("MINIO_ACCESS_KEY", args.access_key)
-    sk = _pick("MINIO_SECRET_KEY", args.secret_key)
+    ak, _AK_SRC = _resolve_secret(args.access_key, "MINIO_ACCESS_KEY")
+    sk, _SK_SRC = _resolve_secret(args.secret_key, "MINIO_SECRET_KEY")
     if not endpoint:
         sys.exit("错误：没有 MinIO 地址。脚本里不写死地址，请用命令行 --endpoint 传入，"
                  "或设环境变量 MINIO_ENDPOINT\n"
@@ -2293,7 +2317,7 @@ def main():
             print("提示：定向名单本身就含「重做」语义，无需 --refix（已忽略）")
         workers = max(1, min(workers_req, len(wanted)))
         print(f"模式：{'APPLY' if args.apply else 'DRY-RUN'}（定向名单 {len(wanted)} 个条目）{dry_note}")
-        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}，地址来自{_ENDPOINT_SRC}）")
+        print(f"连接：{endpoint}（AK={ak[:4]}**** 来自{_AK_SRC}，region={REGION}，地址来自{_ENDPOINT_SRC}）")
         print(f"目录：{prefix}")
         print("名单语义：X.pdf 与 X_sssss.pdf 算同一个文件；已膨胀过的从 _sssss 取原件按当前规则"
               "重新膨胀并覆盖 X.pdf（_sssss 不动），没处理过的正常处理")
@@ -2345,7 +2369,7 @@ def main():
         workers = max(1, min(workers_req, len(sources)))
         shard_note = f"（分片 {args.shard}/{args.shards}）" if args.shards > 1 else ""
         print(f"模式：{'APPLY' if args.apply else 'DRY-RUN'}{shard_note}{dry_note}")
-        print(f"连接：{endpoint}（AK={ak[:4]}****，region={REGION}，地址来自{_ENDPOINT_SRC}）")
+        print(f"连接：{endpoint}（AK={ak[:4]}**** 来自{_AK_SRC}，region={REGION}，地址来自{_ENDPOINT_SRC}）")
         print(f"目录：{prefix}")
         print(f"目录共 {len(sources)} 个源文件（已排除产物后缀），"
               + ("先并发预筛完再处理（--scan-first）" if args.scan_first
