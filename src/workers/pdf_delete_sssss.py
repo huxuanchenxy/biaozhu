@@ -78,6 +78,13 @@ pdf_delete_sssss.py —— 删掉「已膨胀成功、且成品可用」的 X_ss
   #   开了它就自动跳过桶内 COPY；每件比过体积与 MD5 才删，另存 backup_manifest_*.tsv 记底
   python pdf_delete_sssss.py --endpoint ... --prefix "..." --backup-local "D:/备份/sssss留底" --apply
 
+  # 暂停/恢复（脚本同目录，按目录前缀自动带完整标识：bucket+来源标记+最后两段）：
+  #   启动横幅会打印完整路径，形如 .pdf_delete_pause_drivdernet_abc_自筹_5.1_通用材料基因数据_成品语料
+  #   Linux bash：  touch .pdf_delete_pause_<slug>   暂停    rm .pdf_delete_pause_<slug>    恢复
+  #   Windows cmd： type nul > .pdf_delete_pause_<slug>  暂停    del .pdf_delete_pause_<slug>  恢复
+  #   Windows PS：  New-Item .pdf_delete_pause_<slug>    Remove-Item .pdf_delete_pause_<slug>
+  #   在途文件自然收尾后停住，不被强杀；暂停期间每秒一条心跳，tail -f 能看到还活着
+
   凭据：--access-key/--secret-key 或环境变量 MINIO_ACCESS_KEY/MINIO_SECRET_KEY 或同目录 .env
   兼容性：Python 3.6+，零第三方依赖（PyMuPDF 仅在 --verify full 时需要）；Windows/Linux 皆可
 """
@@ -129,6 +136,114 @@ _HEARTBEAT = float(os.environ.get("PDF_HEARTBEAT", "5"))
 _lock = threading.Lock()
 _run = {"ok": 0, "fail": 0, "skip": 0, "bytes": 0, "consec": 0}
 _abort = threading.Event()
+
+# ---------------- 暂停/恢复（文件触发，跨平台；按目录前缀自动带完整标识，多目录并行互不干扰） ----------------
+#
+# 暂停机制：脚本启动时根据 --prefix 算出一个带完整标识的 slug（与 rename 脚本同口径：
+#   bucket/来源标记（自筹/国拨/drivdernet_abc 等）+ 最后两段目录），
+#   暂停文件 = <脚本目录>/.pdf_delete_pause_<slug>
+#
+# 例：prefix='drivdernet_abc/自筹/5_材料基因库/5.1_通用材料基因数据/成品语料'
+#   → slug='drivdernet_abc_自筹_5.1_通用材料基因数据_成品语料'
+#   → pause 文件 = .pdf_delete_pause_drivdernet_abc_自筹_5.1_通用材料基因数据_成品语料
+#
+# 这样不管同一个机器上同时跑多少个目录（不同 bucket、不同来源、不同编号），
+# 每个暂停文件都唯一，不会互相干扰。启动横幅会打印完整路径。
+#
+# Linux 后台用法：touch / rm .pdf_delete_pause_<slug>
+# Windows cmd：  type nul > / del .pdf_delete_pause_<slug>
+# Windows PS：   New-Item / Remove-Item .pdf_delete_pause_<slug>
+
+# 标记段：扫描 prefix 每一段，命中这些关键字就算作"来源标识"的一部分，
+# 让 bucket + 来源标记 + 最后两段一起拼成 slug，避免不同来源的同名目录撞暂停文件。
+_PREFIX_MARKERS = (
+    "自筹", "国拨", "国家级", "省部级", "企业委托",
+    "drivdernet", "drivdernet_abc", "materialsproject", "mp_contribs",
+    "nsfc", "国家自然科学基金",
+)
+
+
+def log_slug_for(prefix: str, max_len: int = 120) -> str:
+    """把 prefix 压成一个完整标识 slug（bucket + 来源标记 + 最后两段），与 rename 脚本同口径。
+
+    例：drivdernet_abc/自筹/5_材料基因库/5.1_通用材料基因数据/成品语料
+      → drivdernet_abc_自筹_5.1_通用材料基因数据_成品语料
+
+    没有任何标记段时回退到最后三段（比 rename 多一段，delete 脚本的 basename 容易重名）。
+    """
+    parts = [p for p in str(prefix).strip("/").split("/") if p]
+    if not parts:
+        return "default"
+    markers_in_path = []
+    for p in parts:
+        for m in _PREFIX_MARKERS:
+            if m in p and p not in markers_in_path:
+                markers_in_path.append(p)
+                break
+    desc_tail = parts[-2:] if len(parts) >= 2 else parts[-1:]
+    if markers_in_path:
+        seen = set()
+        chosen = []
+        for p in markers_in_path + desc_tail:
+            if p not in seen:
+                chosen.append(p)
+                seen.add(p)
+        candidate = chosen
+    else:
+        # 没标记：取最后三段，比 rename 多一段（delete 脚本的 basename 容易和别的目录撞）
+        candidate = parts[-3:] if len(parts) >= 3 else parts
+    slug = re.sub(r"[^\w.\-]+", "_", "_".join(candidate)).strip("_")
+    return slug[:max_len] if slug else "default"
+
+
+_SCRIPT_DIR_DEL = os.path.dirname(os.path.abspath(__file__))
+_PAUSE_FILENAME_DEL = ".pdf_delete_pause"
+_pause_path_del = ""       # 延迟到 main() 算完 slug 后再设
+_pause_checked_at_del = 0.0
+
+
+def set_pause_path_del(prefix: str) -> None:
+    """根据完整 prefix 算出独立暂停文件路径。每个目录一个，同脚本多目录并行互不干扰。"""
+    global _pause_path_del
+    slug = log_slug_for(prefix)
+    _pause_path_del = os.path.join(_SCRIPT_DIR_DEL, f"{_PAUSE_FILENAME_DEL}_{slug}")
+
+
+def pause_file_path_del() -> str:
+    return _pause_path_del or os.path.join(_SCRIPT_DIR_DEL, _PAUSE_FILENAME_DEL)
+
+
+def _pause_file_exists_del() -> bool:
+    if not _pause_path_del:
+        return False
+    global _pause_checked_at_del
+    now = time.time()
+    if now - _pause_checked_at_del < 0.5:
+        return os.path.exists(_pause_path_del)
+    _pause_checked_at_del = now
+    return os.path.exists(_pause_path_del)
+
+
+def wait_if_paused_del(label: str = "") -> None:
+    """暂停点：阻塞等待 .pdf_delete_pause 文件被删除。
+    在途文件不受影响，自然收尾后新任务才被挡住。
+    每秒一条心跳（带 label 说明在哪个阶段停住），tail -f 能看到还活着。
+    """
+    if not _pause_file_exists_del():
+        return
+    hint = f"（{label}）" if label else ""
+    print(f"  ⏸ 检测到暂停文件 {_pause_path_del}{hint}，暂停新任务；删除该文件即可恢复运行",
+          file=sys.stderr, flush=True)
+    while True:
+        try:
+            time.sleep(1.0)
+        except KeyboardInterrupt:
+            raise
+        if not _pause_file_exists_del():
+            print(f"  ▶ 暂停文件已删除，恢复运行{hint}", file=sys.stderr, flush=True)
+            return
+        print(f"  ⏸ 已暂停，等待恢复…（在途文件自然收尾中）{hint}",
+              file=sys.stderr, flush=True)
 
 
 def human_size(num):
@@ -439,6 +554,8 @@ class S3(object):
         complete = False
         first_key_prev = None
         while True:
+            # 暂停点：列目录阶段也能停——翻页时每翻一页就检查一次
+            wait_if_paused_del(f"列目录翻页（已扫 {scanned}）")
             pages += 1
             params = {"list-type": "2", "encoding-type": "url", "max-keys": "1000",
                       "prefix": key_prefix}
@@ -1023,14 +1140,19 @@ def main():
     trash = (args.trash_prefix or trash_prefix_for(key_prefix, day, CONFIG["TRASH_DIR"])).strip("/") + "/"
     if args.restore and args.trash_prefix:
         trash = args.trash_prefix.strip("/") + "/"
-    out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "delete_logs",
-                                       "_".join([p for p in prefix.split("/") if p][-2:]))
+    # slug 用完整 prefix 算（bucket + 来源标记 + 最后两段），同时用于：
+    #   ① delete_logs/<slug>/  — 子目录名，多来源并行跑不会撞文件夹
+    #   ② pdf_delete_<slug>_<TS>.log — 日志文件名
+    #   ③ .pdf_delete_pause_<slug> — 暂停文件（set_pause_path_del 内部再算一次，结果一致）
+    slug = log_slug_for(prefix)
+    out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "delete_logs", slug)
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
+    set_pause_path_del(prefix)
     ts = time.strftime("%Y%m%d%H%M%S")
-    slug = re.sub(r"[^\w.\-]+", "_", os.path.basename(key_prefix.rstrip("/")) or "root")[:40]
-    log_path = os.path.join(out_dir, ("pdf_restore_%s_%s.log" if args.restore
-                                      else "pdf_delete_%s_%s.log") % (slug, ts))
+    log_path = os.path.join(out_dir, ("pdf_restore_%s.log" if args.restore
+                                      else "pdf_delete_%s.log") % ts)
     min_bytes = max(0, int(args.min_inflated)) * 1024 * 1024
     # 本地留底：往桶里写被拒时唯一走得通的反悔依据（只发 GET，不写桶）。
     backup_root = (args.backup_local or "").strip().strip('"') or None
@@ -1056,6 +1178,8 @@ def main():
     print("目录：%s（只列这一层，子目录一概不碰）" % prefix)
     print("本轮动作：%s ｜ 模式：%s" % ("从回收站恢复原件" if args.restore else "删除 _sssss 原件备份件",
                                        "【真动手 APPLY】" if args.apply else "【干跑：绝不写桶】"))
+    print("暂停控制：创建/删除 %s（touch/rm → 暂停/恢复；在途文件自然收尾，不被强杀）"
+          % pause_file_path_del())
     if args.restore:
         print("回收站：%s（恢复只把原件复制回原位，不动回收站里的副本）" % trash)
     elif args.backup_local:
@@ -1148,11 +1272,15 @@ def main():
         print("      没有要验的候选")
     elif args.jobs <= 1 or ThreadPoolExecutor is None:
         for it in todo:
+            # 暂停点：校验阶段串行路径
+            wait_if_paused_del(f"校验 {os.path.basename(it[3])}")
             k, v = one(it)
             verdicts[k[0]] = v
     else:
         with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, 16))) as ex:
+            # 暂停点：线程池校验——一次性 submit 后，在消费循环里等暂停信号
             for i, f in enumerate(as_completed([ex.submit(one, it) for it in todo]), 1):
+                wait_if_paused_del(f"校验 {format(i, ',')}/{format(len(todo), ',')}")
                 it, v = f.result()
                 verdicts[it[0]] = v
                 if i % 500 == 0:
@@ -1300,6 +1428,9 @@ def main():
                 "删前待删 %d 个；逐件记录状态/完成时刻/单件耗时/完整key/原因" % n_before])
 
     def step(item):
+        # 暂停点：每个新文件开始处理前——在途文件（正在 COPY/DELETE 的那个）不受影响，
+        # 自然收尾到安全点才停，新文件被挡住
+        wait_if_paused_del(f"准备删除 {os.path.basename(item[0])}")
         key, size, etag, ikey, isize, ietag = item
         name = os.path.basename(key)
         if _abort.is_set():
@@ -1563,6 +1694,8 @@ def run_restore(client, args, trash, key_prefix, out_dir, log_path, quiet, vers)
                                 % (key_prefix, format(len(todo), ","), vers)], action="恢复")
 
     def step(item):
+        # 暂停点：恢复阶段——每个新文件开始处理前
+        wait_if_paused_del(f"准备恢复 {os.path.basename(item[3])}")
         tk, size, etag, orig = item
         if _abort.is_set():
             return None

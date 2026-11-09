@@ -87,12 +87,12 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   ./pdf_rename_inflate_upload.py -n 20 -w 4 -q              # 先干跑看计划
   ./pdf_rename_inflate_upload.py -n 20 -w 4 -q --apply      # 小批量试点
   nohup ./pdf_rename_inflate_upload.py -n 0 -w 8 -q --apply > run.out 2>&1 &   # 后台全量
-  # 暂停/恢复（脚本同目录下的 .pdf_pause 文件，跨平台）：
-  #   Linux bash：  touch .pdf_pause   暂停    rm .pdf_pause       恢复
-  #   Windows cmd： type nul > .pdf_pause  暂停    del .pdf_pause  恢复
-  #   Windows PowerShell：  New-Item .pdf_pause    Remove-Item .pdf_pause
-  #   在途文件自然收尾后停住，不被强杀；启动横幅也会打印完整路径
-  #   暂停期间每秒一条心跳，tail -f 能看到还活着
+  # 暂停/恢复（脚本同目录，按目录前缀自动带 slug，多目录并行互不干扰）：
+  #   启动横幅会打印完整路径，形如 .pdf_pause_5.1_通用材料基因数据_成品语料
+  #   Linux bash：  touch .pdf_pause_<slug>   暂停    rm .pdf_pause_<slug>    恢复
+  #   Windows cmd： type nul > .pdf_pause_<slug>  暂停    del .pdf_pause_<slug>  恢复
+  #   Windows PS：  New-Item .pdf_pause_<slug>    Remove-Item .pdf_pause_<slug>
+  #   在途文件自然收尾后停住，不被强杀；暂停期间每秒一条心跳，tail -f 能看到还活着
   # 临时换桶/换目录（不改代码，命令行优先级最高）：
   PDF_PREFIX='bucket/别的/目录' MINIO_ENDPOINT=http://1.2.3.4:9000 ./pdf_rename_inflate_upload.py -n 5
   # 多机分摊同一目录（关键：除 --shard 外各机参数必须一致）：
@@ -1697,30 +1697,51 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         log_failed(fname, e)
 
 
-# ---------------- 暂停/恢复（文件触发，跨平台） ----------------
+# ---------------- 暂停/恢复（文件触发，跨平台；按目录前缀自动带 slug，多目录并行互不干扰） ----------------
 #
-# 暂停机制：脚本同目录下的 .pdf_pause 文件存在 → 暂停；删除 → 恢复。
-# 在途文件不会被强杀——会让它们自然收尾（当前下载/膨胀/上传做完），然后停下来等恢复信号。
-# 这样桶里不会留下半截文件（MinIO PUT 要么全成要么全败），下次恢复直接从下一个文件开始。
+# 暂停机制：脚本启动时根据 --prefix 算出目录 slug（和日志名同源），暂停文件路径 =
+#   <脚本目录>/.pdf_pause_<slug>
+# 例如 prefix='drivdernet_abc/自筹/5_材料基因库/5.1_通用材料基因数据/成品语料'
+#   → slug='5.1_通用材料基因数据_成品语料'
+#   → pause 文件 = .pdf_pause_5.1_通用材料基因数据_成品语料
+#
+# 存在 → 暂停（在途文件自然收尾，不被强杀）；删除 → 恢复。
+# 启动横幅会打印完整路径，不用猜 slug。
+#
+# 这样同脚本同时跑多个目录（5.1 一个、9.2 一个），各自的暂停文件独立，互不干扰。
 #
 # Linux 后台用法：
-#   touch .pdf_pause        # 暂停
-#   rm .pdf_pause           # 恢复
+#   touch .pdf_pause_<slug>   # 暂停
+#   rm .pdf_pause_<slug>      # 恢复
+# Windows cmd：
+#   type nul > .pdf_pause_<slug>   # 暂停
+#   del .pdf_pause_<slug>          # 恢复
 # Windows PowerShell：
-#   New-Item .pdf_pause     # 暂停
-#   Remove-Item .pdf_pause  # 恢复
+#   New-Item .pdf_pause_<slug>     # 暂停
+#   Remove-Item .pdf_pause_<slug>  # 恢复
 
 _PAUSE_FILENAME = ".pdf_pause"
-_pause_path = os.path.join(_SCRIPT_DIR, _PAUSE_FILENAME)
+_pause_path = ""          # 延迟到 main() 算完目录 slug 后再设；模块级不知道 prefix
 _pause_checked_at = 0.0     # 上次检查时间，限频避免每个文件都 stat 一次
 
 
+def set_pause_path(slug: str) -> None:
+    """根据目录 slug 算出独立暂停文件路径。每个目录一个，同脚本多目录并行互不干扰。
+
+    例：slug='5.1_通用材料基因数据_成品语料' → pause 文件 = .pdf_pause_5.1_通用材料基因数据_成品语料"""
+    global _pause_path
+    safe_slug = re.sub(r"[^\w.\-]+", "_", slug).strip("_") or "default"
+    _pause_path = os.path.join(_SCRIPT_DIR, f"{_PAUSE_FILENAME}_{safe_slug}")
+
+
 def pause_file_path() -> str:
-    return _pause_path
+    return _pause_path or os.path.join(_SCRIPT_DIR, _PAUSE_FILENAME)
 
 
 def _pause_file_exists() -> bool:
     """检查暂停文件是否存在。限频：至少间隔 0.5s 才真的 stat 一次，在频繁调用的热路径里不浪费。"""
+    if not _pause_path:
+        return False
     global _pause_checked_at
     now = time.time()
     if now - _pause_checked_at < 0.5:
@@ -2480,6 +2501,9 @@ def main():
     if _BIG != 5 * _MIB:
         print(f"注意：原件尺寸上限已放宽到 {human_size(_BIG)}（--max-mb），"
               f"已膨胀过的完成版也会被当原件再膨一次——只建议配名单点名单个文件做验证")
+    # 暂停路径延迟到这里才算——依赖 prefix → log_slug() 结果；
+    # 每个目录一个独立暂停文件，同脚本同时跑多目录互不干扰
+    set_pause_path(log_slug(prefix))
     t_scan = time.time()
     pause_note = (f"暂停控制：创建/删除 {pause_file_path()}（touch→暂停，rm→恢复；"
                   f"在途文件自然收尾，不被强杀）")
