@@ -1342,12 +1342,62 @@ def ts_filename(path: str, enabled: bool = True) -> str:
     return f"{root}_{_RUN_STAMP}{ext}"
 
 
-def log_slug(prefix: str, max_len: int = 40) -> str:
-    """目录前缀压成文件名里的一小段（去掉桶名、只留最后两段）：两个目录并行跑时日志互不覆盖。
-       非法字符换成下划线，过长截断；实在取不出东西就用 default。"""
+# 已知"标记"段：并行跑不同数据源时，这些关键字在路径里能帮助区分
+_PREFIX_MARKERS = (
+    # 资金来源
+    "自筹", "国拨", "国家级", "省部级", "企业委托",
+    # 桶名 / 数据源
+    "drivdernet", "drivdernet_abc", "materialsproject", "mp_contribs",
+    "nsfc", "国家自然科学基金",
+)
+
+
+def log_slug(prefix: str, max_len: int = 80) -> str:
+    """目录前缀压成日志文件名里的一小段，区分并行跑的不同数据源。
+
+    规则：
+      1. 扫描前缀每一段，找出所有"标记"段（自筹 / 国拨 / drivdernet_abc / materialsproject 等）。
+         把标记段 + 最后两段描述性段拼接，保证不同并行任务日志名不撞。
+      2. 如果一个标记都没识别到，回退到旧行为：只取最后两段。
+      3. 非法字符换成下划线，过长截断；实在取不出东西就用 default。
+
+    例：
+      drivdernet_abc/自筹/5_材料基因库/5.1_通用材料基因数据/成品语料
+        → drivdernet_abc_自筹_5.1_通用材料基因数据_成品语料
+      materialsproject/国拨/9_某大类/9.5_具体项目/成品语料
+        → materialsproject_国拨_9.5_具体项目_成品语料
+      某个没标记的老路径 a/b/c/d
+        → c_d  （回退行为）
+    """
     parts = [p for p in prefix.split("/") if p]
-    tail = parts[-2:] if len(parts) >= 3 else parts[-1:]
-    slug = re.sub(r"[^\w.\-]+", "_", "_".join(tail)).strip("_")
+    if not parts:
+        return "default"
+
+    # 找出所有段里命中的标记（按它们在路径里的出现顺序去重）
+    markers_in_path = []
+    for p in parts:
+        for m in _PREFIX_MARKERS:
+            if m in p and p not in markers_in_path:
+                markers_in_path.append(p)
+                break
+
+    # 最后两段通常是 <项目编号>_<项目名> / <成品语料>，作为任务描述性尾巴
+    desc_tail = parts[-2:] if len(parts) >= 2 else parts[-1:]
+
+    if markers_in_path:
+        # 标记 + 描述尾段；用 dict 去重保序
+        seen = set()
+        chosen = []
+        for p in markers_in_path + desc_tail:
+            if p not in seen:
+                chosen.append(p)
+                seen.add(p)
+        candidate = chosen
+    else:
+        # 兜底：旧逻辑
+        candidate = parts[-2:] if len(parts) >= 3 else parts[-1:]
+
+    slug = re.sub(r"[^\w.\-]+", "_", "_".join(candidate)).strip("_")
     return slug[:max_len] if slug else "default"
 
 
