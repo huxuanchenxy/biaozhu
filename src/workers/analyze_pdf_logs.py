@@ -518,8 +518,8 @@ def terminal_output(chunks):
             continue
         print(f"\n===== 【{status}】 分片 =====")
         for c in cs:
-            start_s = c["start"].strftime("%H:%M:%S") if c["start"] else "-"
-            end_s = c["end"].strftime("%H:%M:%S") if c["end"] else "-"
+            start_s = c["start"].strftime("%Y-%m-%d %H:%M:%S") if c["start"] else "-"
+            end_s = c["end"].strftime("%Y-%m-%d %H:%M:%S") if c["end"] else "-"
             print(f"\n  ◆ {c['path']}  →  {c['slug']}  [{c['mode']}]")
             print(f"    墙钟: {start_s} → {end_s}  ({human_duration(c['wall_s'])})")
             total_files = c["processed"] + c["repaired"] + c["failed"]
@@ -593,7 +593,7 @@ def terminal_output(chunks):
         modes = {c["mode"] for c in pcs}
         mode_str = "/".join(sorted(modes))
         print(f"\n  ◆ {proj}  [{mode_str}]  ({len(pcs)} 个分片)")
-        print(f"    墙钟: {p_start.strftime('%m-%d %H:%M') if p_start else '-'} → {p_end.strftime('%H:%M') if p_end else '-'}  ({human_duration(p_wall)})")
+        print(f"    墙钟: {p_start.strftime('%Y-%m-%d %H:%M:%S') if p_start else '-'} → {p_end.strftime('%Y-%m-%d %H:%M:%S') if p_end else '-'}  ({human_duration(p_wall)})")
         print(f"    PROCESSED={p_proc}  REPAIRED={p_rep}  下载 {human_size(p_dl)}  上传 {human_size(p_ul)}  新增 {human_size(p_add)}  带宽 {p_bw:.1f} Mbps")
 
 
@@ -656,8 +656,8 @@ def write_markdown_report(chunks, out_path):
     lines.append("|---|---|---|---|---|---|---:|---:|---:|---|---|---|---|---:|---:|---:|---:|---:|")
     for i, c in enumerate(sorted(chunks, key=lambda x: -x["ul_mb"]), 1):
         st = "✓" if c["finished"] else "✗"
-        ss = c["start"].strftime("%H:%M:%S") if c["start"] else "-"
-        ee = c["end"].strftime("%H:%M:%S") if c["end"] else "-"
+        ss = c["start"].strftime("%m-%d %H:%M:%S") if c["start"] else "-"
+        ee = c["end"].strftime("%m-%d %H:%M:%S") if c["end"] else "-"
         lines.append(
             f"| {i} | `{c['slug']}` | {st} | {c['mode']} | {ss}→{ee} | {human_duration(c['wall_s'])} "
             f"| {c['processed']} | {c['repaired']} | {c['failed']} | {c['skipped']} "
