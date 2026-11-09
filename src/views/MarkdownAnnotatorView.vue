@@ -91,6 +91,8 @@ const translatedContent = ref('')
 const translatedLoading = ref(false)
 const translatedError = ref('')
 const translatedLoaded = ref(false)
+/** 译文是否存在：不存在则为 false，「翻译」按钮直接不展示 */
+const translatedAvailable = ref(true)
 
 /** 拉取文档：URL 带 key 走 MinIO，否则读本地 VITE_APP_DOC_URL；页面其它部分不用动 */
 async function loadDoc() {
@@ -153,13 +155,19 @@ async function loadPdf() {
   pdfLoading.value = false
 }
 
+/** 译文请求序号：换文档后旧请求的返回不能覆盖新文档的结果 */
+let translatedReqId = 0
+
 /**
- * 拉取 cn_ 译文 md：仅在首次切到「翻译」模式时按需加载，避免进页面就拉可能很大/可能不存在的译文。
- * URL 带 key 走 MinIO；本地回退模式没有对应译文，给出提示。
+ * 拉取 cn_ 译文 md：进页面就预请求（不等用户点「翻译」再拉），因为译文可能不存在，
+ * 需要尽早确定「翻译」按钮是否展示。URL 带 key 走 MinIO；本地回退模式没有对应译文。
+ * 译文不存在（后端返回「文件不存在」错误体）时直接隐藏「翻译」按钮，不展示错误。
  */
 async function loadTranslated() {
+  const reqId = ++translatedReqId
   if (!translatedKey.value) {
-    translatedError.value = '本地模式无对应译文 MD：请在 URL 带上 MinIO 对象路径（/markdown/<对象key>）'
+    // 本地回退模式没有对应译文，等价于译文不存在
+    translatedAvailable.value = false
     translatedLoaded.value = true
     return
   }
@@ -168,23 +176,38 @@ async function loadTranslated() {
   translatedContent.value = ''
   try {
     const text = await getObjectText(translatedKey.value)
+    if (reqId !== translatedReqId) return
     // 大文档同样先让转圈绘制一帧再塞内容，避免渲染阻塞导致白屏
     await nextTick()
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    if (reqId !== translatedReqId) return
     translatedContent.value = text
+    translatedAvailable.value = true
     await nextTick()
   } catch (e: any) {
-    translatedError.value = `译文加载失败：${e?.message ?? '未知错误'}`
+    if (reqId !== translatedReqId) return
+    const msg: string = e?.message ?? '未知错误'
+    if (msg.includes('文件不存在')) {
+      // 译文缺失：不展示「翻译」按钮，已停在翻译模式则退回预览
+      translatedAvailable.value = false
+      translatedContent.value = ''
+      if (viewMode.value === 'split') viewMode.value = 'preview'
+    } else {
+      translatedError.value = `译文加载失败：${msg}`
+    }
   } finally {
-    translatedLoading.value = false
-    translatedLoaded.value = true
+    if (reqId === translatedReqId) {
+      translatedLoading.value = false
+      translatedLoaded.value = true
+    }
   }
 }
 
 loadDoc()
 loadPdf()
+loadTranslated()
 
-/** 首次切到「翻译」模式时按需加载译文；已加载过则不重复拉取 */
+/** 兜底：若预请求失败/未完成时切到「翻译」，再补一次加载；已加载过则不重复拉取 */
 watch(viewMode, (mode) => {
   if (mode === 'split' && !translatedLoaded.value && !translatedLoading.value) loadTranslated()
 })
@@ -309,11 +332,12 @@ watch(docKey, () => {
   editingIndex.value = -1
   loadDoc()
   loadPdf()
-  // 换文档：译文重置为未加载；若当前正停在「翻译」模式则立即重新拉取
+  // 换文档：译文重置并立即重新预请求，同时恢复「翻译」按钮，等结果决定是否再隐藏
   translatedLoaded.value = false
   translatedContent.value = ''
   translatedError.value = ''
-  if (viewMode.value === 'split') loadTranslated()
+  translatedAvailable.value = true
+  loadTranslated()
   tabs.value.forEach(loadTab)
 })
 
@@ -517,7 +541,7 @@ onBeforeUnmount(() => {
       <header class="pane-head">
         <span class="pane-title">文档</span>
         <span v-if="loading" class="hint">加载中…</span>
-        <el-radio-group v-model="viewMode" size="small">
+        <el-radio-group v-if="translatedAvailable" v-model="viewMode" size="small">
           <el-radio-button value="preview">预览</el-radio-button>
           <el-radio-button value="split">翻译</el-radio-button>
         </el-radio-group>

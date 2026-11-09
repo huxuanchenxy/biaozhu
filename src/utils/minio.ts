@@ -196,6 +196,19 @@ export async function getObjectText(key: string): Promise<string> {
   if (!res.ok) {
     throw new Error(`读取文件失败 HTTP ${res.status}：${objectKey}`)
   }
+  // 后端「对象不存在 / 权限不足」时返回 HTTP 200 + JSON 错误体（{"code":500,"msg":"文件不存在…"}），
+  // 必须识别出来抛错，否则调用方会把这段 JSON 当正文展示。
+  const ctype = res.headers.get('content-type') || ''
+  if (ctype.includes('application/json')) {
+    const body = await res.text()
+    let msg = body
+    try {
+      msg = JSON.parse(body)?.msg || body
+    } catch {
+      /* 非标准 JSON 就原样带出 */
+    }
+    throw new Error(`读取文件失败：${msg}（${objectKey}）`)
+  }
   return await res.text()
 }
 
