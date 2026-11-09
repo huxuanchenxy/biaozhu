@@ -87,6 +87,12 @@ pdf_rename_inflate_upload.py —— 批量：MinIO 里的 PDF 重命名(_sssss) 
   ./pdf_rename_inflate_upload.py -n 20 -w 4 -q              # 先干跑看计划
   ./pdf_rename_inflate_upload.py -n 20 -w 4 -q --apply      # 小批量试点
   nohup ./pdf_rename_inflate_upload.py -n 0 -w 8 -q --apply > run.out 2>&1 &   # 后台全量
+  # 暂停/恢复（脚本同目录下的 .pdf_pause 文件，跨平台）：
+  #   Linux bash：  touch .pdf_pause   暂停    rm .pdf_pause       恢复
+  #   Windows cmd： type nul > .pdf_pause  暂停    del .pdf_pause  恢复
+  #   Windows PowerShell：  New-Item .pdf_pause    Remove-Item .pdf_pause
+  #   在途文件自然收尾后停住，不被强杀；启动横幅也会打印完整路径
+  #   暂停期间每秒一条心跳，tail -f 能看到还活着
   # 临时换桶/换目录（不改代码，命令行优先级最高）：
   PDF_PREFIX='bucket/别的/目录' MINIO_ENDPOINT=http://1.2.3.4:9000 ./pdf_rename_inflate_upload.py -n 5
   # 多机分摊同一目录（关键：除 --shard 外各机参数必须一致）：
@@ -1490,6 +1496,9 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
     fname = os.path.basename(key)
     skey = s_key_of(key)
     sname = os.path.basename(skey)
+    # 每个文件开始处理前检查暂停——在途文件（正在下载/膨胀/上传的那个）不受影响，
+    # 它会自然收尾到安全点；新文件才被挡住
+    wait_if_paused(f"准备处理 {fname}")
     try:
         kind, size, artifact = (pre if pre is not None
                                 else _classify(client, key, skey, refix, refix_legacy,
@@ -1686,6 +1695,63 @@ def process_one(client: Minio, key: str, idx: int, total: int, apply: bool,
         bump("fail")
         log(f"[{idx}/{total}] {mk_fail} {fname}：{e}")
         log_failed(fname, e)
+
+
+# ---------------- 暂停/恢复（文件触发，跨平台） ----------------
+#
+# 暂停机制：脚本同目录下的 .pdf_pause 文件存在 → 暂停；删除 → 恢复。
+# 在途文件不会被强杀——会让它们自然收尾（当前下载/膨胀/上传做完），然后停下来等恢复信号。
+# 这样桶里不会留下半截文件（MinIO PUT 要么全成要么全败），下次恢复直接从下一个文件开始。
+#
+# Linux 后台用法：
+#   touch .pdf_pause        # 暂停
+#   rm .pdf_pause           # 恢复
+# Windows PowerShell：
+#   New-Item .pdf_pause     # 暂停
+#   Remove-Item .pdf_pause  # 恢复
+
+_PAUSE_FILENAME = ".pdf_pause"
+_pause_path = os.path.join(_SCRIPT_DIR, _PAUSE_FILENAME)
+_pause_checked_at = 0.0     # 上次检查时间，限频避免每个文件都 stat 一次
+
+
+def pause_file_path() -> str:
+    return _pause_path
+
+
+def _pause_file_exists() -> bool:
+    """检查暂停文件是否存在。限频：至少间隔 0.5s 才真的 stat 一次，在频繁调用的热路径里不浪费。"""
+    global _pause_checked_at
+    now = time.time()
+    if now - _pause_checked_at < 0.5:
+        return os.path.exists(_pause_path)
+    _pause_checked_at = now
+    return os.path.exists(_pause_path)
+
+
+def wait_if_paused(label: str = "") -> None:
+    """暂停点：调用方主动检查暂停状态。暂停期间阻塞等待，恢复后返回。
+
+    返回时保证暂停文件已被删除。暂停期间每秒打印一次心跳提示（带 label 说明在哪个阶段停住）。
+    只有在「准备开始一项新工作」的位置才该调用它——比如 process_stream 准备投新任务、
+    process_one 准备处理新文件——这样才能保证在途文件自然收尾到安全点，不会中途被掐。
+    """
+    if not _pause_file_exists():
+        return
+    hint = f"（{label}）" if label else ""
+    log(f"  ⏸ 检测到暂停文件 {_pause_path}{hint}，暂停新任务；删除该文件即可恢复运行")
+    while True:
+        # 每秒刷一次，让 tail -f 能看到"还活着、只是在等"
+        try:
+            time.sleep(1.0)
+        except KeyboardInterrupt:
+            # 用户 Ctrl+C 时别卡在暂停里：让它冒泡上去，由外层处理中断收尾
+            raise
+        if not _pause_file_exists():
+            log(f"  ▶ 暂停文件已删除，恢复运行{hint}")
+            return
+        # 暂停期间定期重申"我还活着"，避免人等急了以为卡死
+        log(f"  ⏸ 已暂停，等待恢复…（在途文件自然收尾中）{hint}")
 
 
 # ---------------- 定向名单（CONFIG["FILES"] / --files）：只处理点名的这几个文件 ----------------
@@ -1996,6 +2062,8 @@ def collect_pending(client: Minio, keys: list, limit: int, workers: int,
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan") as pool:
         while i < len(keys) and (limit <= 0 or len(out) < limit):
+            # 暂停点：预筛阶段（HEAD 探测）也能停
+            wait_if_paused("预筛（HEAD 探测）")
             batch = keys[i:i + window]
             for key, (kind, size, artifact) in pool.map(probe, batch):
                 probed += 1
@@ -2062,6 +2130,8 @@ def process_stream(client: Minio, keys: list, limit: int, workers: int, apply: b
             backlog = set()
             fi = 0
             while True:
+                # 暂停点：扫描阶段也应该能停——暂停时不再发新 HEAD、不再投新任务
+                wait_if_paused("扫描/投递新任务")
                 # 补满扫描窗口（-n 凑够就不再扫；已投喂的照做完）
                 while (len(backlog) < scan_window and fi < len(keys)
                        and (limit <= 0 or st["found"] < limit)):
@@ -2411,6 +2481,9 @@ def main():
         print(f"注意：原件尺寸上限已放宽到 {human_size(_BIG)}（--max-mb），"
               f"已膨胀过的完成版也会被当原件再膨一次——只建议配名单点名单个文件做验证")
     t_scan = time.time()
+    pause_note = (f"暂停控制：创建/删除 {pause_file_path()}（touch→暂停，rm→恢复；"
+                  f"在途文件自然收尾，不被强杀）")
+    print(pause_note)
 
     if wanted:
         # 定向名单模式：只处理点名的这几个，不列目录（4 万个对象翻页对点名没有意义），
