@@ -97,6 +97,7 @@ import io
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -1093,6 +1094,12 @@ def main():
     ap.add_argument("--yes", action="store_true", help="跳过交互确认（非交互终端必须带）")
     ap.add_argument("--out", help="名单与日志目录（默认 脚本目录/delete_logs/<目录尾段>）")
     ap.add_argument("-q", "--quiet", action="store_true", help="不原地刷新，只报整行心跳")
+    ap.add_argument("--bg", action="store_true",
+                    help="（仅 Linux）用 nohup 把本脚本后台拉起，日志自动写到 "
+                         "delete_logs/<slug>/run_<slug>.out，PID 落 run_<slug>.pid，"
+                         "父进程启动后立刻退出，省掉每次手打 > xxx.out 2>&1 & 那坨")
+    ap.add_argument("--bg-out", metavar="PATH",
+                    help="（配 --bg）自定义后台日志输出路径（默认 delete_logs/<slug>/run_<slug>.out）")
     args = ap.parse_args()
 
     ensure_utf8_streams()
@@ -1154,6 +1161,68 @@ def main():
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
     set_pause_path_del(prefix)
+
+    # ---- --bg 后台拉起 ----
+    if args.bg:
+        if not sys.platform.startswith("linux"):
+            sys.exit("错误：--bg 仅支持 Linux（内部用 nohup + setsid 脱离终端）。"
+                     "Windows 请用 Start-Process python 或直接用 pythonw.exe 后台执行。")
+        # 子命令：去掉 --bg 和 --bg-out（避免无限递归），转成绝对路径
+        cleaned = []
+        skip_next = 0
+        i = 0
+        raw_argv = sys.argv[1:]
+        while i < len(raw_argv):
+            a = raw_argv[i]
+            if skip_next:
+                skip_next -= 1
+                i += 1
+                continue
+            if a == "--bg":
+                i += 1
+                continue
+            if a == "--bg-out":
+                skip_next = 1
+                i += 1
+                continue
+            if a.startswith("--bg-out="):
+                i += 1
+                continue
+            cleaned.append(a)
+            i += 1
+        script_abs = os.path.abspath(sys.argv[0])
+        out_path = os.path.abspath(args.bg_out or os.path.join(os.getcwd(), "run_%s.del.out" % slug))
+        pid_path = os.path.join(os.path.dirname(out_path),
+                                os.path.splitext(os.path.basename(out_path))[0] + ".pid")
+        if os.path.dirname(out_path):
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        # shell=True 时直接拼命令串，这样 > out 2>&1 由 shell 处理，最稳
+        def _shell_q(s):
+            """安全拼 shell 参数：含空格/引号的用单引号包，内部单引号转成 '\\''"""
+            if re.match(r"^[\w@%+=:,./-]+$", s):
+                return s
+            return "'" + s.replace("'", "'\\''") + "'"
+        cmd = "nohup %s -u %s %s > %s 2>&1" % (
+            _shell_q(sys.executable),
+            _shell_q(script_abs),
+            " ".join(_shell_q(a) for a in cleaned),
+            _shell_q(out_path))
+        try:
+            p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)     # 等同 setsid，彻底脱离控制终端
+        except Exception as e:
+            sys.exit("错误：后台拉起失败：%s\n  命令：%s" % (e, cmd))
+        try:
+            with open(pid_path, "w") as f:
+                f.write(str(p.pid) + "\n")
+        except OSError:
+            pass
+        print("已后台拉起：PID=%d（已写入 %s）" % (p.pid, pid_path))
+        print("日志：tail -f %s" % out_path)
+        print("暂停：touch %s    恢复：rm %s" % (pause_file_path_del(), pause_file_path_del()))
+        sys.exit(0)
+
     ts = time.strftime("%Y%m%d%H%M%S")
     log_path = os.path.join(out_dir, ("pdf_restore_%s.log" if args.restore
                                       else "pdf_delete_%s.log") % ts)
