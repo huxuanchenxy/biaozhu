@@ -567,8 +567,12 @@ class S3(object):
             body = resp.read()
             resp.close()
             # 响应虽来自自有 MinIO，仍禁 DTD/实体解析（与备份脚本同规矩）
-            if b"<!DOCTYPE" in body or b"&" in body.replace(b"&amp;", b"").replace(
-                    b"&lt;", b"").replace(b"&gt;", b"").replace(b"&quot;", b""):
+            # 合法 XML 预定义实体只有 5 个：&amp; &lt; &gt; &quot; &apos;
+            _ENT = (b"&amp;", b"&lt;", b"&gt;", b"&quot;", b"&apos;")
+            _c = body
+            for _e in _ENT:
+                _c = _c.replace(_e, b"")
+            if b"<!DOCTYPE" in body or b"&" in _c:
                 raise RuntimeError("列目录响应含非法 DTD/实体，已中止")
             root = ET.fromstring(body)
             page_first = None
