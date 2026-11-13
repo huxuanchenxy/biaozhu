@@ -1096,10 +1096,10 @@ def main():
     ap.add_argument("-q", "--quiet", action="store_true", help="不原地刷新，只报整行心跳")
     ap.add_argument("--bg", action="store_true",
                     help="（仅 Linux）用 nohup 把本脚本后台拉起，日志自动写到 "
-                         "delete_logs/<slug>/run_<slug>.out，PID 落 run_<slug>.pid，"
+                         "当前目录 run_<slug>_<时间戳>.out，PID 落 run_<slug>_<时间戳>.pid，"
                          "父进程启动后立刻退出，省掉每次手打 > xxx.out 2>&1 & 那坨")
     ap.add_argument("--bg-out", metavar="PATH",
-                    help="（配 --bg）自定义后台日志输出路径（默认 delete_logs/<slug>/run_<slug>.out）")
+                    help="（配 --bg）自定义后台日志输出路径（默认 当前目录/run_<slug>_<时间戳>.out）")
     args = ap.parse_args()
 
     ensure_utf8_streams()
@@ -1191,7 +1191,8 @@ def main():
             cleaned.append(a)
             i += 1
         script_abs = os.path.abspath(sys.argv[0])
-        out_path = os.path.abspath(args.bg_out or os.path.join(os.getcwd(), "run_%s.del.out" % slug))
+        _ts = time.strftime("%Y%m%d_%H_%M_%S")
+        out_path = os.path.abspath(args.bg_out or os.path.join(os.getcwd(), "run_%s_%s.out" % (slug, _ts)))
         pid_path = os.path.join(os.path.dirname(out_path),
                                 os.path.splitext(os.path.basename(out_path))[0] + ".pid")
         if os.path.dirname(out_path):

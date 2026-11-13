@@ -175,6 +175,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -686,21 +687,36 @@ def list_pdfs(endpoint: str, ak: str, sk: str, prefix: str, quiet: bool = False,
             "没输出不等于卡住）")
     pathname = strict_encode_path(f"/{bucket}")
     keys, token, offset, full = [], None, 0, False
+    _LIST_RETRIES = 4
     while True:
         params = {"list-type": "2", "encoding-type": "url", "max-keys": "1000",
                   "prefix": key_prefix, "delimiter": "/"}
         if token:
             params["continuation-token"] = token
-        try:
-            resp = _signed_get(endpoint, ak, sk, pathname, params, offset_sec=offset)
-            body = resp.read()
-        except urllib.error.HTTPError as e:
-            err = e.read()
-            new_offset = skew_offset(err, e.headers)
-            if new_offset is not None and offset == 0:
-                offset = new_offset
-                continue
-            sys.exit(f"错误：列目录失败 HTTP {e.code}：{err.decode('utf-8', 'replace')[:300]}")
+        resp = None
+        body = None
+        for attempt in range(_LIST_RETRIES):
+            try:
+                resp = _signed_get(endpoint, ak, sk, pathname, params, offset_sec=offset)
+                body = resp.read()
+                break
+            except urllib.error.HTTPError as e:
+                err = e.read()
+                new_offset = skew_offset(err, e.headers)
+                if new_offset is not None and offset == 0:
+                    offset = new_offset
+                    break
+                if _retryable(e.code) and attempt < _LIST_RETRIES - 1:
+                    time.sleep(min(2 ** attempt, 20))
+                    continue
+                sys.exit(f"错误：列目录失败 HTTP {e.code}：{err.decode('utf-8', 'replace')[:300]}")
+            except (urllib.error.URLError, OSError) as e:
+                if attempt < _LIST_RETRIES - 1:
+                    time.sleep(min(2 ** attempt, 20))
+                    continue
+                sys.exit(f"错误：列目录网络失败（{_LIST_RETRIES} 次重试都被 reset/超时）：{e}")
+        if body is None:
+            continue
         # 响应来自自有 MinIO，但仍禁用 DTD/实体解析，避免实体注入类攻击
         if b"<!DOCTYPE" in body or b"&" in body.replace(b"&amp;", b"").replace(b"&lt;", b"") \
                 .replace(b"&gt;", b"").replace(b"&quot;", b"").replace(b"&apos;", b""):
@@ -2399,6 +2415,12 @@ def main():
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="静默：不出进度条，改成每几秒一行带计数的进度"
                              "（nohup/重定向到文件时自动生效，不必手写）")
+    parser.add_argument("--bg", action="store_true",
+                        help="（仅 Linux）用 nohup 把本脚本后台拉起，日志自动写到"
+                             "当前目录 run_<slug>_<时间戳>.out，PID 落 run_<slug>_<时间戳>.pid，"
+                             "父进程启动后立刻退出，省掉每次手打 > xxx.out 2>&1 & 那坨")
+    parser.add_argument("--bg-out", metavar="PATH",
+                        help="（配 --bg）自定义后台日志输出路径（默认 当前目录/run_<slug>_<时间戳>.out）")
     args = parser.parse_args()
 
     # 输出不是终端（nohup / 重定向到文件 / systemd）时，\r 原地刷新的进度条只会把文件写成一条
@@ -2503,7 +2525,69 @@ def main():
               f"已膨胀过的完成版也会被当原件再膨一次——只建议配名单点名单个文件做验证")
     # 暂停路径延迟到这里才算——依赖 prefix → log_slug() 结果；
     # 每个目录一个独立暂停文件，同脚本同时跑多目录互不干扰
-    set_pause_path(log_slug(prefix))
+    slug = log_slug(prefix)
+    set_pause_path(slug)
+
+    # ---- --bg 后台拉起 ----
+    if args.bg:
+        if not sys.platform.startswith("linux"):
+            sys.exit("错误：--bg 仅支持 Linux（内部用 nohup + setsid 脱离终端）。"
+                     "Windows 请用 Start-Process python 或直接用 pythonw.exe 后台执行。")
+        # 子命令：去掉 --bg 和 --bg-out（避免无限递归）
+        cleaned = []
+        skip_next = 0
+        i = 0
+        raw_argv = sys.argv[1:]
+        while i < len(raw_argv):
+            a = raw_argv[i]
+            if skip_next:
+                skip_next -= 1
+                i += 1
+                continue
+            if a == "--bg":
+                i += 1
+                continue
+            if a == "--bg-out":
+                skip_next = 1
+                i += 1
+                continue
+            if a.startswith("--bg-out="):
+                i += 1
+                continue
+            cleaned.append(a)
+            i += 1
+        script_abs = os.path.abspath(sys.argv[0])
+        _ts = time.strftime("%Y%m%d_%H_%M_%S")
+        out_path = os.path.abspath(args.bg_out or os.path.join(os.getcwd(), "run_%s_%s.out" % (slug, _ts)))
+        pid_path = os.path.join(os.path.dirname(out_path),
+                                os.path.splitext(os.path.basename(out_path))[0] + ".pid")
+        if os.path.dirname(out_path):
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        def _shell_q(s):
+            if re.match(r"^[\w@%+=:,./-]+$", s):
+                return s
+            return "'" + s.replace("'", "'\\''") + "'"
+        cmd = "nohup %s -u %s %s > %s 2>&1" % (
+            _shell_q(sys.executable),
+            _shell_q(script_abs),
+            " ".join(_shell_q(a) for a in cleaned),
+            _shell_q(out_path))
+        try:
+            p = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        except Exception as e:
+            sys.exit("错误：后台拉起失败：%s\n  命令：%s" % (e, cmd))
+        try:
+            with open(pid_path, "w") as f:
+                f.write(str(p.pid) + "\n")
+        except OSError:
+            pass
+        print("已后台拉起：PID=%d（已写入 %s）" % (p.pid, pid_path))
+        print("日志：tail -f %s" % out_path)
+        print("暂停：touch %s    恢复：rm %s" % (pause_file_path(), pause_file_path()))
+        sys.exit(0)
+
     t_scan = time.time()
     pause_note = (f"暂停控制：创建/删除 {pause_file_path()}（touch→暂停，rm→恢复；"
                   f"在途文件自然收尾，不被强杀）")
